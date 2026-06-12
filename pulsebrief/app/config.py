@@ -23,7 +23,7 @@ DB_PATH = PROJECT_ROOT / "pulsebrief.db"
 class Settings:
     openai_api_key: str | None = None
     groq_api_key: str | None = None
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "llama-3.1-8b-instant"
     news_api_key: str | None = None
     delivery_channel: str = "twilio"
     slack_bot_token: str | None = None
@@ -51,7 +51,7 @@ class Settings:
         return cls(
             openai_api_key=os.getenv("OPENAI_API_KEY") or None,
             groq_api_key=os.getenv("GROQ_API_KEY") or None,
-            groq_model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            groq_model=os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"),
             news_api_key=os.getenv("NEWS_API_KEY") or None,
             delivery_channel=(os.getenv("DELIVERY_CHANNEL") or "twilio").strip().lower(),
             slack_bot_token=os.getenv("SLACK_BOT_TOKEN") or None,

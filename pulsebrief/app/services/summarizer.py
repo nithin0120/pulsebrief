@@ -41,6 +41,25 @@ def _match_category(value: object, categories: list[str]) -> str | None:
     return canon.get(raw.lower())
 
 
+def _fallback_why(article: RawArticle, sentences: list[str]) -> str:
+    """Best-effort, article-specific 'why it matters' when AI is unavailable.
+
+    Uses the most consequential-looking sentence from the description rather
+    than a single canned line, so entries are not identical.
+    """
+    impact_cues = (
+        "could", "would", "may", "expected", "impact", "after", "because",
+        "raising", "amid", "leading", "threat", "risk", "first", "record",
+        "billion", "million", "ban", "warn", "rule", "court", "deal",
+    )
+    candidates = [s for s in sentences if any(cue in s.lower() for cue in impact_cues)]
+    if candidates:
+        return max(candidates, key=len)
+    if len(sentences) >= 2:
+        return sentences[-1]
+    return f"A developing {article.topic} story to keep an eye on."
+
+
 def _extractive_summary(article: RawArticle) -> ArticleSummary:
     desc = (article.description or "").strip()
     title = article.title.strip()
@@ -54,11 +73,7 @@ def _extractive_summary(article: RawArticle) -> ArticleSummary:
     else:
         tldr = f"{title}. Details are limited from the available excerpt."
 
-    why = (
-        f"This story relates to {article.topic} and may affect ongoing developments in that area."
-        if article.topic
-        else "This story may be relevant to your tracked news topics."
-    )
+    why = _fallback_why(article, sentences)
     long_parts = [title]
     if desc:
         long_parts.append(desc)

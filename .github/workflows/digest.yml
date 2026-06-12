@@ -20,7 +20,7 @@ jobs:
       MAX_TOTAL_ARTICLES: "40"
       CANDIDATES_PER_TOPIC: "6"
       MIN_IMPORTANCE: "7"
-      GROQ_MODEL: llama-3.3-70b-versatile
+      GROQ_MODEL: llama-3.1-8b-instant
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
       NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
