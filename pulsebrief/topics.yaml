@@ -1,0 +1,81 @@
+topics:
+  - name: Tech
+    keywords:
+      - technology
+      - tech industry
+      - big tech
+      - software
+      - gadgets
+    queries:
+      - technology OR big tech OR software
+
+  - name: Finance
+    keywords:
+      - finance
+      - economy
+      - inflation
+      - federal reserve
+      - interest rates
+    queries:
+      - finance OR economy OR inflation OR Federal Reserve
+
+  - name: Startups
+    keywords:
+      - startup
+      - venture capital
+      - funding round
+      - unicorn
+      - IPO
+    queries:
+      - startup OR venture capital OR funding OR IPO
+
+  - name: Stocks
+    keywords:
+      - stock market
+      - Wall Street
+      - S&P 500
+      - Nasdaq
+      - earnings
+    queries:
+      - stock market OR Wall Street OR Nasdaq OR earnings
+
+  - name: US News
+    keywords:
+      - US news
+      - United States
+      - Congress
+      - White House
+      - American politics
+    queries:
+      - US news OR Congress OR White House
+
+  - name: World News
+    keywords:
+      - world news
+      - international
+      - geopolitics
+      - foreign affairs
+      - global
+    queries:
+      - world news OR geopolitics OR international
+
+  - name: AI
+    keywords:
+      - artificial intelligence
+      - machine learning
+      - large language model
+      - OpenAI
+      - generative AI
+    queries:
+      - artificial intelligence OR machine learning OR LLM
+
+  - name: Sports
+    keywords:
+      - basketball
+      - NBA
+      - football
+      - NFL
+      - soccer
+      - Premier League
+    queries:
+      - basketball OR NBA OR NFL OR soccer OR Premier League
