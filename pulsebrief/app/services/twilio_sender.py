@@ -98,10 +98,8 @@ class TwilioSender:
     def format_topic_articles(self, articles: list[Article]) -> str:
         """Body for a single topic's notification (no topic tag — that's the title)."""
         lines: list[str] = []
-        for i, article in enumerate(articles, 1):
-            pos = article.digest_position or i
-            imp = f" ·{article.importance}/10" if getattr(article, "importance", None) else ""
-            lines.append(f"{pos}. {article.title}{self._label(article)}{imp}")
+        for article in articles:
+            lines.append(f"{article.title}{self._label(article)}")
             lines.append(f"   Source: {article.source}")
             lines.append(f"   TLDR: {article.tldr or 'N/A'}")
             if article.why_it_matters:

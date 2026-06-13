@@ -88,17 +88,30 @@ class NtfySender(TwilioSender):
             return 4  # high
         return 3  # default
 
+    @staticmethod
+    def _action_label(article: Article, index: int) -> str:
+        # Commas/semicolons are ntfy Actions delimiters; strip them from labels.
+        source = (article.source or "").replace(",", " ").replace(";", " ").strip()
+        source = source[:22] if source else f"Story {index}"
+        return f"Open: {source}"
+
+    def _open_actions(self, articles: list[Article]) -> str | None:
+        """One 'Open' view-action button per article (ntfy caps actions at 3)."""
+        actions = [
+            f"view, {self._action_label(article, i)}, {article.url}"
+            for i, article in enumerate(articles[:3], 1)
+            if article.url
+        ]
+        return "; ".join(actions) if actions else None
+
     def send_topic_digest(self, topic: str, articles: list[Article]) -> bool:
         body = self.format_topic_articles(articles)
         lead = articles[0] if articles else None
-        click = lead.url if lead else None
-        # ntfy view-action button. (Save/Ignore would need a phone-reachable
-        # endpoint, so they are handled via the CLI instead.)
-        actions = f"view, Open Article, {lead.url}" if lead else None
+        click = lead.url if lead else None  # tapping the notification opens the top story
         return self._publish(
             body,
             title=topic,
             click=click,
             priority=self._priority_for(articles),
-            actions=actions,
+            actions=self._open_actions(articles),
         )
