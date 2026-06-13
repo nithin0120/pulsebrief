@@ -33,6 +33,91 @@ REPUTABLE_SOURCES = {
 
 USER_AGENT = "PulseBrief/1.0 (local news digest)"
 
+# Map registrable domains to clean, human outlet names. Covers the messy/bare
+# source names NewsAPI and GDELT often return (e.g. "Internet", "Biztoc.com").
+SOURCE_DOMAIN_NAMES = {
+    "thehackernews.com": "The Hacker News",
+    "bleepingcomputer.com": "BleepingComputer",
+    "biztoc.com": "Biztoc",
+    "slashdot.org": "Slashdot",
+    "arstechnica.com": "Ars Technica",
+    "theverge.com": "The Verge",
+    "techcrunch.com": "TechCrunch",
+    "wired.com": "Wired",
+    "engadget.com": "Engadget",
+    "venturebeat.com": "VentureBeat",
+    "gizmodo.com": "Gizmodo",
+    "reuters.com": "Reuters",
+    "apnews.com": "Associated Press",
+    "bbc.com": "BBC",
+    "bbc.co.uk": "BBC",
+    "nytimes.com": "The New York Times",
+    "wsj.com": "The Wall Street Journal",
+    "ft.com": "Financial Times",
+    "bloomberg.com": "Bloomberg",
+    "theguardian.com": "The Guardian",
+    "cnbc.com": "CNBC",
+    "cnn.com": "CNN",
+    "washingtonpost.com": "The Washington Post",
+    "aljazeera.com": "Al Jazeera",
+    "nypost.com": "New York Post",
+    "financialpost.com": "Financial Post",
+    "cryptobriefing.com": "Crypto Briefing",
+    "rawstory.com": "Raw Story",
+    "espn.com": "ESPN",
+    "politico.com": "Politico",
+    "axios.com": "Axios",
+    "npr.org": "NPR",
+    "businessinsider.com": "Business Insider",
+    "forbes.com": "Forbes",
+    "marketwatch.com": "MarketWatch",
+    "yahoo.com": "Yahoo News",
+}
+
+# Source names that carry no information; derive a name from the URL instead.
+GENERIC_SOURCE_NAMES = {"", "unknown", "internet", "google news", "[removed]", "rss", "news"}
+
+
+def _registrable_domain(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        netloc = urlparse(url).netloc.lower().split(":")[0]
+    except ValueError:
+        return ""
+    return netloc[4:] if netloc.startswith("www.") else netloc
+
+
+# Second-level labels in multi-part public suffixes (e.g. ".co.uk", ".com.au").
+_PUBLIC_SLDS = {"co", "com", "org", "net", "gov", "ac", "edu", "gob", "or"}
+
+
+def _prettify_domain(domain: str) -> str:
+    parts = [p for p in domain.split(".") if p]
+    if len(parts) >= 3 and parts[-2] in _PUBLIC_SLDS:
+        label = parts[-3]
+    elif len(parts) >= 2:
+        label = parts[-2]
+    else:
+        label = parts[0] if parts else ""
+    return label.replace("-", " ").title() if label else "Unknown"
+
+
+def normalize_source(raw_name: str | None, url: str) -> str:
+    """Return a clean outlet name, mapping/derived from the domain when needed."""
+    domain = _registrable_domain(url)
+    if domain in SOURCE_DOMAIN_NAMES:
+        return SOURCE_DOMAIN_NAMES[domain]
+    for known, name in SOURCE_DOMAIN_NAMES.items():
+        if domain == known or domain.endswith("." + known):
+            return name
+
+    cleaned = (raw_name or "").strip()
+    looks_like_domain = "." in cleaned and " " not in cleaned
+    if not cleaned or cleaned.lower() in GENERIC_SOURCE_NAMES or looks_like_domain:
+        return _prettify_domain(domain) if domain else (cleaned or "Unknown")
+    return cleaned
+
 
 @dataclass
 class RawArticle:
@@ -51,6 +136,7 @@ class RawArticle:
             self.canonical_url = canonicalize_url(self.url)
         if not self.is_opinion:
             self.is_opinion = detect_opinion(self.title, self.url)
+        self.source = normalize_source(self.source, self.url)
 
 
 def normalize_title(title: str) -> str:
