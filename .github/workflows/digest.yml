@@ -2,8 +2,11 @@ name: PulseBrief Digest
 
 on:
   schedule:
-    # Every 6 hours (UTC). GitHub may delay a few minutes under load.
-    - cron: "0 */6 * * *"
+    # Check hourly, but only actually run if >= MIN_INTERVAL_HOURS have passed
+    # since the last real run (see the "Decide whether to run" step). This gives
+    # "every 6h since the last run" instead of fixed clock times, and is robust
+    # to GitHub's best-effort scheduling delays.
+    - cron: "0 * * * *"
   workflow_dispatch: {}
 
 jobs:
@@ -13,6 +16,7 @@ jobs:
       run:
         working-directory: pulsebrief
     env:
+      MIN_INTERVAL_HOURS: "6"
       DELIVERY_CHANNEL: ntfy
       NTFY_SERVER: https://ntfy.sh
       TIMEZONE: America/Los_Angeles
@@ -27,14 +31,68 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Restore the timestamp of the last *real* run. restore-keys matches the
+      # newest cache with this prefix, so it always reflects the latest run.
+      - name: Restore last-run marker
+        uses: actions/cache/restore@v4
+        with:
+          path: pulsebrief/.lastrun
+          key: pulsebrief-lastrun-${{ github.run_id }}
+          restore-keys: |
+            pulsebrief-lastrun-
+
+      - name: Decide whether to run
+        id: decide
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -e
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual dispatch -> running."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          GRACE=600  # 10-min grace so an hourly tick a touch early still counts
+          THRESHOLD=$(( MIN_INTERVAL_HOURS * 3600 - GRACE ))
+          NOW=$(date +%s)
+          LAST=0
+          if [ -f pulsebrief/.lastrun ]; then
+            LAST=$(cat pulsebrief/.lastrun 2>/dev/null || echo 0)
+          fi
+          [ -z "$LAST" ] && LAST=0
+          ELAPSED=$(( NOW - LAST ))
+          echo "last=$LAST now=$NOW elapsed=${ELAPSED}s threshold=${THRESHOLD}s"
+          if [ "$LAST" -eq 0 ] || [ "$ELAPSED" -ge "$THRESHOLD" ]; then
+            echo "Enough time since last run -> running."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Only ${ELAPSED}s since last run (< ${THRESHOLD}s) -> skipping."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-python@v5
+        if: steps.decide.outputs.run == 'true'
         with:
           python-version: "3.11"
           cache: "pip"
           cache-dependency-path: pulsebrief/requirements.txt
 
       - name: Install dependencies
+        if: steps.decide.outputs.run == 'true'
         run: pip install -r requirements.txt
 
       - name: Run digest
-        run: python cli.py run-digest
+        if: steps.decide.outputs.run == 'true'
+        run: python cli.py run
+
+      # Record "now" as the last real run, then persist it for the next check.
+      - name: Update last-run marker
+        if: steps.decide.outputs.run == 'true'
+        working-directory: ${{ github.workspace }}
+        run: date +%s > pulsebrief/.lastrun
+
+      - name: Save last-run marker
+        if: steps.decide.outputs.run == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: pulsebrief/.lastrun
+          key: pulsebrief-lastrun-${{ github.run_id }}

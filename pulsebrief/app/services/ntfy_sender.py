@@ -34,7 +34,14 @@ class NtfySender(TwilioSender):
     def is_configured(self) -> bool:
         return bool(self._topic)
 
-    def _publish(self, body: str, title: str = "PulseBrief", click: str | None = None) -> bool:
+    def _publish(
+        self,
+        body: str,
+        title: str = "PulseBrief",
+        click: str | None = None,
+        priority: int | None = None,
+        actions: str | None = None,
+    ) -> bool:
         topic = self._topic
         if not topic:
             logger.warning("ntfy topic not configured; message not sent:\n%s", body[:500])
@@ -44,6 +51,10 @@ class NtfySender(TwilioSender):
         base_headers = {"Title": _ascii_header(title), "Tags": "newspaper"}
         if click:
             base_headers["Click"] = click
+        if priority:
+            base_headers["Priority"] = str(priority)
+        if actions:
+            base_headers["Actions"] = _ascii_header(actions)
         if self._token:
             base_headers["Authorization"] = f"Bearer {self._token}"
 
@@ -67,7 +78,27 @@ class NtfySender(TwilioSender):
     def send_message(self, text: str, to: str | None = None) -> bool:
         return self._publish(text, title="PulseBrief")
 
+    @staticmethod
+    def _priority_for(articles: list[Article]) -> int:
+        """Map the most important story in the batch to an ntfy priority (1-5)."""
+        top = max((a.importance or 0 for a in articles), default=0)
+        if top >= 9:
+            return 5  # max
+        if top >= 8:
+            return 4  # high
+        return 3  # default
+
     def send_topic_digest(self, topic: str, articles: list[Article]) -> bool:
         body = self.format_topic_articles(articles)
-        click = articles[0].url if articles else None
-        return self._publish(body, title=topic, click=click)
+        lead = articles[0] if articles else None
+        click = lead.url if lead else None
+        # ntfy view-action button. (Save/Ignore would need a phone-reachable
+        # endpoint, so they are handled via the CLI instead.)
+        actions = f"view, Open Article, {lead.url}" if lead else None
+        return self._publish(
+            body,
+            title=topic,
+            click=click,
+            priority=self._priority_for(articles),
+            actions=actions,
+        )

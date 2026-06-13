@@ -1,0 +1,13 @@
+# PulseBrief personal preferences (safe to commit).
+#
+# These are read by BOTH local runs and the scheduled GitHub Actions run, so
+# committing + pushing changes here is how you tune your cloud digest.
+# Manage them with the CLI, e.g.:
+#   python cli.py mute-keyword "celebrity gossip"
+#   python cli.py mute-source "Biztoc.com"
+# or edit the lists directly.
+
+muted_keywords: []      # drop any story whose title/description contains these
+muted_sources: []       # drop any story from these outlets
+disliked_sources: []    # down-rank (but don't drop) these outlets
+preferred_topics: []    # gently boost stories in these topics

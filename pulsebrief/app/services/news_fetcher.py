@@ -11,11 +11,17 @@ from difflib import SequenceMatcher
 from typing import Any
 from urllib.parse import quote_plus
 
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+
 import httpx
 
 from app.config import TopicConfig, settings
 
 logger = logging.getLogger(__name__)
+
+# Query params that are tracking noise; stripping them helps URL dedup.
+_TRACKING_PREFIXES = ("utm_", "fbclid", "gclid", "mc_", "ref", "cmpid", "icid")
+_OPINION_MARKERS = ("opinion", "op-ed", "editorial", "analysis", "commentary", "/opinion/")
 
 REPUTABLE_SOURCES = {
     "reuters", "associated press", "ap news", "bbc", "bbc news", "the guardian",
@@ -37,6 +43,14 @@ class RawArticle:
     content: str | None
     topic: str
     published_at: datetime | None
+    canonical_url: str = ""
+    is_opinion: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.canonical_url:
+            self.canonical_url = canonicalize_url(self.url)
+        if not self.is_opinion:
+            self.is_opinion = detect_opinion(self.title, self.url)
 
 
 def normalize_title(title: str) -> str:
@@ -44,8 +58,37 @@ def normalize_title(title: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+def canonicalize_url(url: str) -> str:
+    """Normalize a URL for dedup: lowercase host, drop fragments/tracking params."""
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url.strip())
+    except ValueError:
+        return url.strip().lower()
+    netloc = parsed.netloc.lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    kept = [
+        (k, v)
+        for k, v in parse_qsl(parsed.query, keep_blank_values=False)
+        if not any(k.lower().startswith(p) for p in _TRACKING_PREFIXES)
+    ]
+    path = parsed.path.rstrip("/")
+    return urlunparse((parsed.scheme.lower(), netloc, path, "", urlencode(kept), ""))
+
+
+def detect_opinion(title: str, url: str) -> bool:
+    haystack = f"{title.lower()} {url.lower()}"
+    return any(marker in haystack for marker in _OPINION_MARKERS)
+
+
+def text_similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, a, b).ratio()
+
+
 def titles_are_similar(a: str, b: str, threshold: float = 0.82) -> bool:
-    return SequenceMatcher(None, normalize_title(a), normalize_title(b)).ratio() >= threshold
+    return text_similarity(normalize_title(a), normalize_title(b)) >= threshold
 
 
 def is_reputable_source(source: str) -> bool:
@@ -55,20 +98,29 @@ def is_reputable_source(source: str) -> bool:
 
 
 def deduplicate_articles(articles: list[RawArticle]) -> list[RawArticle]:
-    seen_urls: set[str] = set()
+    """Drop duplicate stories by canonical URL, near-identical titles, or
+    highly similar descriptions (the same wire story republished widely)."""
+    seen_canonical: set[str] = set()
     seen_titles: list[str] = []
+    seen_descriptions: list[str] = []
     unique: list[RawArticle] = []
 
     for article in articles:
-        url_key = article.url.rstrip("/").lower()
-        if url_key in seen_urls:
+        canon = article.canonical_url or article.url.rstrip("/").lower()
+        if canon in seen_canonical:
             continue
-
         if any(titles_are_similar(article.title, t) for t in seen_titles):
             continue
+        desc = (article.description or "").strip().lower()
+        if desc and len(desc) > 60 and any(
+            text_similarity(desc, prev) >= 0.9 for prev in seen_descriptions
+        ):
+            continue
 
-        seen_urls.add(url_key)
+        seen_canonical.add(canon)
         seen_titles.append(article.title)
+        if desc:
+            seen_descriptions.append(desc)
         unique.append(article)
 
     logger.info("Deduplicated %d -> %d articles", len(articles), len(unique))
@@ -128,14 +180,46 @@ class NewsFetcher:
             "pageSize": 20,
             "apiKey": settings.news_api_key,
         }
-        resp = await client.get("https://newsapi.org/v2/everything", params=params)
-        resp.raise_for_status()
-        data = resp.json()
+        data = await self._newsapi_get_with_retry(client, params)
+        if data is None:
+            return []
 
         if data.get("status") != "ok":
-            raise RuntimeError(data.get("message", "NewsAPI error"))
+            # rateLimited / maximumResultsReached etc. — log and skip, don't crash the run.
+            logger.warning("NewsAPI non-ok for '%s': %s", topic.name, data.get("message"))
+            return []
 
         return [self._parse_newsapi_item(item, topic.name) for item in data.get("articles", [])]
+
+    async def _newsapi_get_with_retry(
+        self, client: httpx.AsyncClient, params: dict, max_attempts: int = 3
+    ) -> dict[str, Any] | None:
+        for attempt in range(max_attempts):
+            try:
+                resp = await client.get("https://newsapi.org/v2/everything", params=params)
+                if resp.status_code == 429:
+                    if attempt >= max_attempts - 1:
+                        logger.warning("NewsAPI rate limited; giving up for this topic")
+                        return None
+                    wait = 2 ** (attempt + 1)
+                    logger.warning("NewsAPI rate limited; retrying in %ds", wait)
+                    await asyncio.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                return resp.json()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code >= 500 and attempt < max_attempts - 1:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                logger.warning("NewsAPI HTTP error: %s", exc)
+                return None
+            except (httpx.RequestError, ValueError) as exc:
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                logger.warning("NewsAPI request failed: %s", exc)
+                return None
+        return None
 
     def _parse_newsapi_item(self, item: dict[str, Any], topic: str) -> RawArticle:
         source_name = "Unknown"

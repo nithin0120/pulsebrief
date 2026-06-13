@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TOPICS_FILE = PROJECT_ROOT / "topics.yaml"
+PREFERENCES_FILE = PROJECT_ROOT / "preferences.yaml"
 ENV_FILE = PROJECT_ROOT / ".env"
 DB_PATH = PROJECT_ROOT / "pulsebrief.db"
 
@@ -42,6 +43,7 @@ class Settings:
     max_articles_per_topic: int = 3
     max_total_articles: int = 40
     candidates_per_topic: int = 6
+    max_per_source: int = 2
     min_importance: int = 6
     database_url: str = f"sqlite:///{DB_PATH}"
 
@@ -70,6 +72,7 @@ class Settings:
             max_articles_per_topic=int(os.getenv("MAX_ARTICLES_PER_TOPIC", "3")),
             max_total_articles=int(os.getenv("MAX_TOTAL_ARTICLES", "40")),
             candidates_per_topic=int(os.getenv("CANDIDATES_PER_TOPIC", "6")),
+            max_per_source=int(os.getenv("MAX_PER_SOURCE", "2")),
             min_importance=int(os.getenv("MIN_IMPORTANCE", "6")),
         )
 
@@ -100,6 +103,46 @@ def load_topics(path: Path | None = None) -> list[TopicConfig]:
             topics.append(TopicConfig(name=name, keywords=keywords, queries=queries))
     logger.info("Loaded %d topics from %s", len(topics), topics_path)
     return topics
+
+
+def validate_settings(s: Settings | None = None) -> list[str]:
+    """Return a list of human-readable configuration problems (empty = all good).
+
+    Warnings are non-fatal: the app still runs (e.g. falls back to extractive
+    summaries or console delivery), but the user should know what's degraded.
+    """
+    s = s or settings
+    problems: list[str] = []
+
+    if not s.news_api_key:
+        problems.append(
+            "NEWS_API_KEY is not set — falling back to GDELT, which is lower quality."
+        )
+    if not s.groq_api_key and not s.openai_api_key:
+        problems.append(
+            "Neither GROQ_API_KEY nor OPENAI_API_KEY is set — using extractive "
+            "summaries only (no AI insight, importance, or categorization)."
+        )
+
+    channel = s.delivery_channel
+    if channel == "ntfy" and not s.ntfy_topic:
+        problems.append("DELIVERY_CHANNEL=ntfy but NTFY_TOPIC is empty — output will print to console.")
+    elif channel == "twilio" and not (
+        s.twilio_account_sid and s.twilio_auth_token and s.twilio_from_number and s.twilio_to_number
+    ):
+        problems.append("DELIVERY_CHANNEL=twilio but Twilio credentials are incomplete.")
+    elif channel == "slack" and not (s.slack_bot_token and s.slack_channel_id):
+        problems.append("DELIVERY_CHANNEL=slack but Slack credentials are incomplete.")
+
+    if not (1 <= s.min_importance <= 10):
+        problems.append(f"MIN_IMPORTANCE={s.min_importance} is outside 1-10.")
+
+    return problems
+
+
+def log_validation(s: Settings | None = None) -> None:
+    for problem in validate_settings(s):
+        logger.warning("Config: %s", problem)
 
 
 settings = Settings.from_env()

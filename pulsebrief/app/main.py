@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
-from app.config import load_topics, settings
+from app.config import load_topics, log_validation, settings
 from app.database import get_db, init_db
 from app.jobs.scheduler import start_scheduler, stop_scheduler
 from app.models import Article
@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    log_validation()
     start_scheduler()
     logger.info("PulseBrief started")
     yield
@@ -80,6 +81,40 @@ async def run_digest(
         message=run.message,
         articles=[ArticleOut.model_validate(a) for a in articles],
     )
+
+
+@app.get("/digest/history")
+def digest_history(limit: int = 10, db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+    service = DigestService(db)
+    return [
+        {
+            "id": run.id,
+            "created_at": run.created_at.isoformat(),
+            "article_count": run.article_count,
+            "cluster_count": getattr(run, "cluster_count", 0),
+            "status": run.status,
+            "message": run.message,
+        }
+        for run in service.get_history(limit=limit)
+    ]
+
+
+@app.get("/clusters/latest")
+def latest_clusters(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+    service = DigestService(db)
+    return [
+        {
+            "title": c.title,
+            "topic": c.topic,
+            "importance": c.importance,
+            "summary": c.summary,
+            "what_happened_today": c.what_happened_today,
+            "why_it_matters": c.why_it_matters,
+            "source_links": c.source_links,
+            "conflicting_details": c.conflicting_details,
+        }
+        for c in service.get_latest_clusters()
+    ]
 
 
 @app.get("/articles/recent", response_model=list[ArticleOut])

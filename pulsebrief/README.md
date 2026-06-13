@@ -1,19 +1,22 @@
 # PulseBrief
 
-A local-first personal AI news digest app. PulseBrief fetches daily world news for topics you choose, summarizes them into TLDR format, stores everything in SQLite, and delivers a digest via Twilio (SMS/WhatsApp) or Slack, with a CLI/console fallback.
+A local-first personal **news intelligence agent**. PulseBrief fetches news for topics you choose, triages and ranks it, writes rich AI summaries, groups related coverage into story clusters, and delivers a daily intelligence brief to your phone — learning from what you save and ignore over time.
 
 ## Features
 
 - **Topic configuration** via `topics.yaml`
-- **News sourcing** from NewsAPI (primary) or GDELT (fallback)
-- **Smart ranking** by recency, relevance, source diversity, and reputation
-- **AI summarization** via Groq (free) or OpenAI, with extractive fallback
-- **Pluggable delivery** — ntfy (free push), Twilio (SMS/WhatsApp), Slack, or console, chosen via `DELIVERY_CHANNEL`
-- **Per-topic notifications** — one push per topic (title = topic, body expands to headlines)
-- **Two-way commands** (Twilio/Slack): `more 1`, `full 1`, `topics`, `run digest`
-- **CLI** for local use without any messaging account
-- **REST API** via FastAPI
-- **Recurring scheduling** via APScheduler (every N hours)
+- **News sourcing** from NewsAPI (primary) or GDELT (fallback), with rate-limit handling
+- **Strong deduplication** — canonical URLs (tracking params stripped), similar titles, and similar descriptions
+- **Source diversity** — hard caps per source and per topic, reputable-source boost, opinion/analysis labeling
+- **Two-stage AI** — a cheap batched *triage* scores importance/category for all candidates, then full rich summaries are written only for the finalists (keeps you under free-tier token limits)
+- **Rich structured summaries** — `tldr`, `why_it_matters`, `bias_or_angle`, `key_entities`, `follow_up_question`, `background`, `what_changed_today`, `what_to_watch_next`
+- **Story clustering** — related articles grouped with shared source links and conflict flags
+- **Personalized memory** — `save`/`ignore` interactions (SQLite) plus git-portable mutes/preferences (`preferences.yaml`) that also apply to your cloud runs
+- **Daily intelligence brief** — Top Stories → per-topic sections → Watchlist
+- **AI summarization** via Groq (free) or OpenAI, with an extractive fallback and a failure queue
+- **Pluggable delivery** — ntfy (free push, with priority + action button), Twilio (SMS/WhatsApp), Slack, or console
+- **Two-way + local commands** — `more`, `full`, `explain`, `today`, `topics`, `history`, `save`, `ignore`
+- **REST API** via FastAPI; **recurring scheduling** locally (APScheduler) or in the cloud (GitHub Actions)
 
 ## Requirements
 
@@ -52,7 +55,7 @@ A local-first personal AI news digest app. PulseBrief fetches daily world news f
    | Variable | Description |
    |----------|-------------|
    | `GROQ_API_KEY` | Groq key for free AI summaries (used first when set). Get one at [console.groq.com/keys](https://console.groq.com/keys) |
-   | `GROQ_MODEL` | Groq model (default `llama-3.3-70b-versatile`) |
+   | `GROQ_MODEL` | Groq model (default `llama-3.1-8b-instant` — high free-tier limits) |
    | `OPENAI_API_KEY` | OpenAI key, used only if no Groq key (extractive fallback if empty/out of quota) |
    | `NEWS_API_KEY` | NewsAPI key (optional — uses GDELT if empty; a free key from [newsapi.org](https://newsapi.org) is recommended for reliable fetching) |
    | `DELIVERY_CHANNEL` | `ntfy` (default, free), `twilio`, `slack`, or `console` |
@@ -68,10 +71,13 @@ A local-first personal AI news digest app. PulseBrief fetches daily world news f
    | `DIGEST_INTERVAL_HOURS` | Run the digest every N hours (default: 6) |
    | `RUN_ON_STARTUP` | If `true`, run a digest ~10s after the server starts |
    | `TIMEZONE` | IANA timezone, e.g. `America/Los_Angeles` |
-   | `MAX_ARTICLES_PER_TOPIC` | Max articles per topic (default: 4) |
-   | `MAX_TOTAL_ARTICLES` | Max total articles across all topics (default: 40) |
+   | `MAX_ARTICLES_PER_TOPIC` | Max stories per topic in the final brief (default: 3) |
+   | `MAX_TOTAL_ARTICLES` | Max total candidates considered across all topics (default: 40) |
+   | `MAX_PER_SOURCE` | Max stories any single outlet can contribute (default: 2) |
+   | `CANDIDATES_PER_TOPIC` | Candidates pulled per topic before AI triage (default: 6) |
+   | `MIN_IMPORTANCE` | Drop anything the AI scores below this importance, 1–10 (default: 7) |
 
-5. **Customize topics** in `topics.yaml` (see below).
+5. **Customize topics** in `topics.yaml` (see below), and tune `preferences.yaml` (mutes/preferences).
 
 ## Setting up ntfy (free default delivery)
 
@@ -117,22 +123,39 @@ The server runs at `http://127.0.0.1:8000`. API docs at `/docs`.
 **Run a digest manually via CLI:**
 
 ```bash
-python cli.py run-digest
+python cli.py run                 # fetch, summarize, cluster, deliver
+python cli.py run --no-send       # build the brief but print locally instead of sending
 ```
 
-Skip delivery and print locally only:
+**Read & explore:**
 
 ```bash
-python cli.py run-digest --no-send
+python cli.py today               # print the latest Morning Brief
+python cli.py topics              # list configured topics
+python cli.py history             # recent digest runs
+python cli.py more 1              # longer summary for story #1
+python cli.py full 1              # full brief (background, entities, bias) for #1
+python cli.py explain 1           # deep dive: background, who benefits, who is hurt, what to watch
 ```
 
-**Other CLI commands:**
+**Teach it your preferences (memory):**
 
 ```bash
-python cli.py topics
-python cli.py more 1
-python cli.py full 1
+python cli.py save 1              # remember you liked story #1 (boosts its topic later)
+python cli.py ignore 2            # down-rank story #2 and its source going forward
+python cli.py mute-keyword "celebrity gossip"   # never show stories matching this
+python cli.py mute-source "Biztoc.com"          # never show stories from this outlet
+python cli.py add-topic "Climate"               # add a topic to topics.yaml
+python cli.py remove-topic "Sports"             # remove a topic
 ```
+
+> Mutes and topic edits are written to `preferences.yaml` / `topics.yaml`. Because your scheduled digest runs on an **ephemeral GitHub Actions runner** (no access to your local database), these files are how preferences reach the cloud — **commit and push them** to apply there. `save`/`ignore` history lives in your local SQLite and shapes local runs.
+
+## Always-on Cloud Scheduling (GitHub Actions)
+
+`.github/workflows/digest.yml` runs the digest in the cloud so it works even with your laptop closed. Instead of fixed clock times, it implements **"every `MIN_INTERVAL_HOURS` since the last real run"**: a cron wakes hourly, but a guard step skips immediately unless enough time has passed since the last actual run (the timestamp is persisted in the Actions cache). This makes a manual run reset the timer and is robust to GitHub's best-effort scheduling delays.
+
+Set repository **Secrets** (`Settings → Secrets and variables → Actions`): `GROQ_API_KEY`, `NEWS_API_KEY`, `NTFY_TOPIC`. Non-secret tuning (model, limits, channel) lives as `env:` in the workflow. Commit `preferences.yaml`/`topics.yaml` to control what the cloud run delivers.
 
 ## API Endpoints
 
@@ -141,6 +164,8 @@ python cli.py full 1
 | GET | `/health` | Health check |
 | GET | `/topics` | List configured topics |
 | POST | `/digest/run` | Run digest now |
+| GET | `/digest/history` | Recent digest runs |
+| GET | `/clusters/latest` | Story clusters from the latest digest |
 | GET | `/articles/recent` | Recent stored articles |
 | GET | `/articles/{id}` | Article detail |
 | GET | `/articles/{id}/long-summary` | Long summary only |
@@ -172,26 +197,38 @@ Restart the server after changes (topics are loaded on each digest run).
 
 ## How It Works
 
-1. **Fetch** — For each topic, query NewsAPI or GDELT for recent English articles.
-2. **Deduplicate** — Remove duplicates by URL and similar titles.
-3. **Rank** — Score by recency, keyword relevance, source reputation, and diversity.
-4. **Summarize** — Generate TLDR, "why it matters", and long summary via OpenAI.
-5. **Store** — Persist articles and digest runs in SQLite (`pulsebrief.db`).
-6. **Deliver** — Send the formatted digest via the configured channel (Twilio SMS/WhatsApp, Slack, or console).
+1. **Fetch** — For each topic, query NewsAPI or GDELT for recent English articles (with retry + rate-limit handling).
+2. **Deduplicate** — Drop duplicates by canonical URL (tracking params stripped), similar titles, and similar descriptions.
+3. **Filter + rank** — Remove muted keywords/sources; score by recency, relevance, reputation, diversity, and your saved/ignored history. Hard caps per source and per topic.
+4. **Triage (cheap)** — One batched AI call scores every candidate's importance (1–10) and category. Anything below `MIN_IMPORTANCE` or with no clear category is dropped.
+5. **Summarize (rich)** — Only the finalists get a full structured summary (`tldr`, `why_it_matters`, `bias_or_angle`, `key_entities`, `background`, `what_changed_today`, `what_to_watch_next`, …). Failures go to a retry queue and fall back to extractive summaries.
+6. **Cluster** — Group related stories, attach 2–4 source links, flag multi-outlet coverage.
+7. **Store** — Persist articles, clusters, interactions, and run history in SQLite (`pulsebrief.db`).
+8. **Deliver** — Send per-topic pushes (ntfy includes priority + an Open Article button) or print the full Morning Brief.
 
-## Digest Format
+## Digest Format (Morning Brief)
 
 ```
-Good morning — here's your PulseBrief.
+Morning Brief — Saturday, June 13, 2026
 
-1. [AI] Article title
-   Source: Reuters
-   TLDR: …
-   Why it matters: …
-   Link: …
+TOP STORIES
+1. [Tech] phpBB forum fixes auth bypass bug lurking for a decade (importance 9)
+   A 10-year-old authentication bypass vulnerability was discovered...
 
-Reply with: more 1 | more 2 | full 1 | topics
+CYBERSECURITY
+- China-Linked Hackers Backdoored Linux Login Software... [Opinion/Analysis]
+  Source: The Hacker News
+  TLDR: …
+  Why it matters: …
+  Link: …
+
+WATCHLIST
+- Likely to develop: …
+- Underreported: …
+- Conflicting reports: …
 ```
+
+Per-topic phone notifications use the topic as the title and a numbered, source-labeled body; reply (Twilio/Slack) or run locally with `more <n>`, `full <n>`, `explain <n>`.
 
 ## Project Structure
 
@@ -204,22 +241,40 @@ pulsebrief/
     models.py            # ORM models
     schemas.py           # Pydantic schemas
     services/
-      news_fetcher.py    # NewsAPI + GDELT
-      summarizer.py      # OpenAI summarization
-      ranker.py          # Article ranking
+      news_fetcher.py    # NewsAPI + GDELT, canonical URLs, dedup, opinion detection
+      summarizer.py      # Triage + rich Groq/OpenAI summaries + explain()
+      ranker.py          # Ranking with caps, reputation, memory/preference signals
+      clustering.py      # Story clustering (no extra LLM calls)
+      brief.py           # Morning Brief formatter
+      preferences.py     # Mutes / topic edits (preferences.yaml, topics.yaml)
+      memory.py          # save/ignore interactions + summary-failure queue (SQLite)
       sender.py          # Delivery channel factory
-      ntfy_sender.py     # ntfy push delivery (free)
-      twilio_sender.py   # Twilio SMS/WhatsApp delivery
+      ntfy_sender.py     # ntfy push delivery (priority + action button)
+      twilio_sender.py   # Twilio SMS/WhatsApp delivery + formatting
       slack_sender.py    # Slack delivery
       digest_service.py  # Orchestration
     jobs/
-      scheduler.py       # Daily APScheduler job
+      scheduler.py       # Recurring APScheduler job
   cli.py
   topics.yaml
+  preferences.yaml       # your mutes/preferences (committed, used by cloud runs too)
   requirements.txt
   .env.example
   README.md
 ```
+
+## Troubleshooting
+
+| Symptom | Cause / Fix |
+|---------|-------------|
+| `429 Too Many Requests` from Groq | Free-tier per-minute limit. Use `GROQ_MODEL=llama-3.1-8b-instant`, lower `CANDIDATES_PER_TOPIC`, or wait a minute — the client retries automatically. |
+| Summaries look generic / lack insight | No working AI key — set `GROQ_API_KEY`. Without it, PulseBrief uses an extractive fallback (no importance, category, or bias). |
+| `database is locked` | Two processes hit SQLite at once. Avoid running the CLI while the API server is also running a digest; the engine waits up to 30s. |
+| Few or no stories delivered | `MIN_IMPORTANCE` may be too strict, or mutes too broad. Lower `MIN_IMPORTANCE` or check `preferences.yaml`. |
+| Cloud digest ignores my mutes | Mutes live in `preferences.yaml` — commit and push it so the GitHub Actions runner picks it up. |
+| NewsAPI returns nothing | Missing/invalid `NEWS_API_KEY` (falls back to GDELT) or rate-limited; check logs. |
+
+On startup and on `python cli.py run`, PulseBrief logs any configuration problems (missing keys, incomplete delivery setup) so you know what's degraded.
 
 ## Future Improvements
 
@@ -227,12 +282,10 @@ pulsebrief/
 - Web UI for topic management and article browsing
 - Per-topic delivery schedules
 - RSS feed support
-- User feedback loop (thumbs up/down) to improve ranking
+- LLM-assisted clustering and explicit conflict detection across sources
 - Multi-user support with separate topic profiles
 - Docker Compose packaging
-- Slack interactive buttons instead of text replies
-- Article clustering for better duplicate-story detection
-- Caching and rate-limit handling for API quotas
+- Slack interactive buttons / ntfy Save & Ignore actions via a hosted endpoint
 
 ## License
 
