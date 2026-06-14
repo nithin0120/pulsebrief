@@ -329,7 +329,7 @@ class NewsFetcher:
         if " OR " in query:
             query = query.split(" OR ")[0].strip()
         params = {
-            "query": query,
+            "query": f"{query} sourcelang:english",
             "mode": "ArtList",
             "maxrecords": "25",
             "format": "json",

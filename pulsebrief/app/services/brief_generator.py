@@ -58,15 +58,23 @@ class BriefGenerator:
             return build_fallback_brief(contexts, clusters_for_fallback), 0, 0
 
         payload = [c.to_dict() for c in contexts]
-        # Stay under Groq free-tier per-request TPM (~6000 input tokens).
-        while len(payload) > 2 and _estimate_tokens(json.dumps(payload)) > 4500:
-            payload = payload[: len(payload) - 1]
-        for ctx in payload:
-            ctx["descriptions"] = [d[:80] for d in ctx.get("descriptions", [])[:2]]
-            ctx["extracted_key_sentences"] = ctx.get("extracted_key_sentences", [])[:2]
-            ctx["titles"] = ctx.get("titles", [])[:2]
-            ctx["urls"] = ctx.get("urls", [])[:2]
-            ctx["sources"] = ctx.get("sources", [])[:2]
+
+        def _trim(pl: list, aggressive: bool = False) -> None:
+            for ctx in pl:
+                desc_len = 50 if aggressive else 100
+                ctx["descriptions"] = [d[:desc_len] for d in ctx.get("descriptions", [])[:2]]
+                ctx["extracted_key_sentences"] = ctx.get("extracted_key_sentences", [])[
+                    : 1 if aggressive else 2
+                ]
+                ctx["titles"] = ctx.get("titles", [])[:2]
+                ctx["urls"] = ctx.get("urls", [])[:2]
+                ctx["sources"] = ctx.get("sources", [])[:2]
+
+        _trim(payload)
+        while _estimate_tokens(json.dumps(payload)) > 2800 and len(payload) > 3:
+            _trim(payload, aggressive=True)
+            if _estimate_tokens(json.dumps(payload)) > 2800:
+                payload = payload[: len(payload) - 1]
 
         def _call(pl: list) -> tuple[dict | None, str, int, int]:
             pr = (
@@ -80,7 +88,11 @@ class BriefGenerator:
                 '"source_comparison":{"agreement":"...","differences":"...","framing_or_bias":"..."},'
                 '"confidence":"low|medium|high","sources":[{"name":"...","url":"..."}]}],'
                 '"watchlist":[{"story":"...","reason":"likely to develop|underreported|conflicting reports"}]}\n'
-                "Cover every cluster_id. Be factual and concise.\n\n"
+                "You MUST return exactly one top_stories entry for every cluster_id in CLUSTERS.\n"
+                "Write what_happened as a clear 3-4 sentence paragraph (roughly 60-90 words).\n"
+                "Write why_it_matters as one sentence explaining significance.\n"
+                "Set confidence=high only for major breaking news confirmed by multiple sources.\n"
+                "Be factual; do not invent details beyond the provided context.\n\n"
                 f"CLUSTERS:\n{json.dumps(pl, ensure_ascii=False)}"
             )
             est_in = _estimate_tokens(pr)
@@ -91,7 +103,7 @@ class BriefGenerator:
                     {"role": "user", "content": pr},
                 ],
                 temperature=0.2,
-                max_tokens=min(3000, max_tokens),
+                max_tokens=min(2400, max_tokens),
                 response_format={"type": "json_object"},
             )
             content = resp.choices[0].message.content or ""
@@ -113,9 +125,12 @@ class BriefGenerator:
         except Exception as exc:
             err = str(exc)
             if "413" in err or "too large" in err.lower() or "tokens" in err.lower():
-                logger.warning("Groq payload too large; retrying with fewer clusters")
+                logger.warning("Groq payload too large; retrying with trimmed clusters")
                 try:
-                    smaller = payload[: max(2, len(payload) // 2)]
+                    smaller = list(payload)
+                    _trim(smaller, aggressive=True)
+                    while len(smaller) > 3 and _estimate_tokens(json.dumps(smaller)) > 2400:
+                        smaller = smaller[: len(smaller) - 1]
                     data, content, est_in, est_out = _call(smaller)
                     if data and data.get("top_stories"):
                         data["fallback"] = False

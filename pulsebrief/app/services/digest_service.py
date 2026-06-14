@@ -9,7 +9,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.config import load_config, load_topics
+from app.config import PUBLIC_DIR, load_config, load_topics
+from app.services.brief_html import export_brief_static
 from app.models import Article, DigestRun, ExtractedText, StoryCluster
 from app.services import memory as memory_mod
 from app.services.brief import (
@@ -29,6 +30,8 @@ from app.services.pipeline.compressor import ContextCompressor
 from app.services.pipeline.deduper import deduplicate_articles
 from app.services.pipeline.extractor import ArticleExtractor
 from app.services.pipeline.junk_filter import filter_junk
+from app.services.pipeline.local_brief import build_local_brief, merge_groq_polish
+from app.services.pipeline.language_filter import filter_by_language
 from app.services.pipeline.normalizer import normalize_all
 from app.services.pipeline.scorer import score_all
 from app.services.preferences import PreferenceFilter
@@ -36,6 +39,18 @@ from app.services.sender import get_sender
 from app.services.sources.orchestrator import FetchOrchestrator
 
 logger = logging.getLogger(__name__)
+
+
+def _top_for_groq_polish(
+    per_topic: list[StoryClusterData],
+    limit: int,
+) -> list[StoryClusterData]:
+    """Top-N stories by importance — optional Groq paragraph polish."""
+    return sorted(
+        per_topic,
+        key=lambda c: (c.importance_score, c.source_count),
+        reverse=True,
+    )[:limit]
 
 
 class DigestService:
@@ -71,8 +86,14 @@ class DigestService:
         raw = await fetcher.fetch_all(topics)
         run.fetched_count = len(raw)
 
-        # Stage 2: Normalize + junk filter
+        # Stage 2: Normalize + junk + language filter
+        lang_cfg = self.config.get("language", {})
         articles = filter_junk(normalize_all(raw))
+        articles = filter_by_language(
+            articles,
+            allowed=lang_cfg.get("allowed", ["en"]),
+            enabled=lang_cfg.get("enabled", True),
+        )
 
         # Mute filter
         before = len(articles)
@@ -93,27 +114,40 @@ class DigestService:
         # Stage 5: Cluster
         clusters = StoryClusterer(self.config).cluster(articles)
 
-        # Stage 6: Rank clusters
-        finalists = ClusterRanker(self.config).select(clusters, topics)
+        # Stage 6: One top story per topic (guaranteed category coverage)
+        ranker = ClusterRanker(self.config)
+        per_topic = ranker.select_per_topic(clusters, topics)
 
-        # Stage 7: Extract full text for finalists only
-        extracted = ArticleExtractor(self.config).enrich_clusters(finalists)
+        if not per_topic:
+            run.status = "completed"
+            run.message = "No stories met the bar in any topic"
+            self.db.commit()
+            return run
+
+        # Stage 7: Extract full text for per-topic leaders
+        extracted = ArticleExtractor(self.config).enrich_clusters(per_topic)
         self._persist_extracted(extracted)
 
-        # Stage 8: Compress contexts (cap count for Groq TPM budget)
-        max_for_groq = min(len(finalists), 4)
-        contexts = ContextCompressor(self.config).build_contexts(
-            finalists, extracted, max_clusters=max_for_groq
-        )
-        self._last_contexts = [c.to_dict() for c in contexts]
+        compressor = ContextCompressor(self.config)
+        contexts_all = compressor.build_contexts(per_topic, extracted)
+        self._last_contexts = [c.to_dict() for c in contexts_all]
         self._last_extracted = extracted
 
-        # Stage 9: ONE batched Groq call (or fallback)
+        # Stage 8: Local brief — all topics, extractive summaries (free, no token limits)
+        brief = build_local_brief(per_topic, contexts_all)
+
+        # Stage 9: Optional Groq polish for top stories only
+        groq_cfg = self.config.get("groq", {})
+        max_enrich = int(groq_cfg.get("max_enrich_clusters", 3))
+        polish_targets = _top_for_groq_polish(per_topic, max_enrich)
+        polish_topics = {c.topic for c in polish_targets}
         groq_used = 0
-        if self.budget.can_request("digest"):
-            brief, est_in, est_out = self.brief_gen.generate_digest(
-                contexts,
-                clusters_for_fallback=finalists,
+
+        if self.budget.can_request("digest") and polish_targets:
+            polish_contexts = compressor.build_contexts(polish_targets, extracted)
+            groq_brief, est_in, est_out = self.brief_gen.generate_digest(
+                polish_contexts,
+                clusters_for_fallback=polish_targets,
                 max_tokens=self.budget.max_tokens_per_digest,
             )
             groq_used = 1
@@ -122,26 +156,25 @@ class DigestService:
                 model=self.brief_gen._model,
                 input_tokens=est_in,
                 output_tokens=est_out,
-                success=not brief.get("fallback"),
+                success=not groq_brief.get("fallback"),
             )
-        else:
-            from app.services.pipeline.fallback import build_fallback_brief
-
-            brief = build_fallback_brief(contexts, finalists)
+            brief = merge_groq_polish(brief, groq_brief, polish_topics)
 
         self._last_brief = brief
 
         # Persist articles + clusters + digest run
-        self._store_pipeline_results(run, finalists, brief)
+        self._store_pipeline_results(run, per_topic, brief)
 
         run.article_count = len(brief.get("top_stories", []))
-        run.cluster_count = len(finalists)
+        run.cluster_count = len(per_topic)
         run.groq_requests = groq_used
         run.brief_json = json.dumps(brief, ensure_ascii=False)
         run.status = "completed"
+        polished = brief.get("groq_polished", 0)
         run.message = (
             f"Fetched {run.fetched_count} -> {len(articles)} after dedup -> "
-            f"{len(finalists)} finalist clusters; Groq calls: {groq_used}"
+            f"{len(per_topic)} topics covered"
+            + (f"; Groq polished {polished}" if polished else "; local extractive only")
         )
         self.db.commit()
 
@@ -149,13 +182,20 @@ class DigestService:
             "fetched": run.fetched_count,
             "after_dedup": len(articles),
             "clusters": len(clusters),
-            "finalists": len(finalists),
+            "finalists": len(per_topic),
+            "topics_covered": brief.get("topics_covered", len(per_topic)),
             "groq_requests": groq_used,
-            "tokens_saved_estimate": max(0, len(articles) - len(finalists)) * 800,
+            "tokens_saved_estimate": max(0, len(articles) - len(per_topic)) * 800,
         }
 
+        try:
+            export_brief_static(brief, run.id, PUBLIC_DIR)
+            logger.info("Exported static brief to %s", PUBLIC_DIR)
+        except Exception:
+            logger.exception("Failed to export static brief page")
+
         if send and brief.get("top_stories"):
-            self._deliver_brief(brief, finalists)
+            self._deliver_brief(brief, per_topic, run_id=run.id)
 
         logger.info("Digest run %d completed: %s", run.id, run.message)
         return run
@@ -232,12 +272,20 @@ class DigestService:
         self.db.flush()
         return article
 
-    def _deliver_brief(self, brief: dict[str, Any], finalists: list[StoryClusterData]) -> None:
+    def _deliver_brief(
+        self,
+        brief: dict[str, Any],
+        finalists: list[StoryClusterData],
+        run_id: int | None = None,
+    ) -> None:
         ntfy_cfg = self.config.get("ntfy", {})
         if hasattr(self.sender, "send_intelligence_brief"):
-            sent = self.sender.send_intelligence_brief(brief, finalists, ntfy_cfg)
+            sent = self.sender.send_intelligence_brief(
+                brief, finalists, ntfy_cfg, run_id=run_id
+            )
             if sent:
                 return
+            logger.warning("ntfy delivery failed; printing brief to console")
 
         # Console fallback
         print("\n" + format_brief_json(brief) + "\n")

@@ -1,6 +1,10 @@
 # Tuning for the local processing pipeline. All values have sensible defaults
 # in code; this file overrides them.
 
+language:
+  enabled: true
+  allowed: [en]                   # drop non-English headlines (GDELT/RSS leak through)
+
 fetch:
   max_articles_per_source: 30     # cap per RSS/aggregator query
   max_total_articles: 300         # hard cap on fetched candidates per run
@@ -32,31 +36,33 @@ scoring:
   recency_half_life_hours: 18     # recency score decays with this half-life
   low_quality_sources: [biztoc, slashdot, msn]
 
-  ranking:
-  max_final_clusters: 6           # top clusters sent to Groq / shown in brief
+ranking:
+  max_final_clusters: 8           # top clusters sent to Groq / shown in brief
   min_final_clusters: 3
-  max_clusters_per_topic: 2       # unless flagged as a major breaking event
+  max_clusters_per_topic: 1
   max_articles_per_source: 2
   require_international: true      # try to include >=1 international story
+  ensure_topic_diversity: true     # round-robin across topics (Science, AI, US, etc.)
 
 extraction:
   enabled: true
-  max_finalist_full_text: 8       # only fetch full text for this many clusters
-  extra_sources_per_cluster: 1    # also extract N additional sources per cluster
-  max_chars: 6000                 # truncate extracted text
+  max_finalist_full_text: 12       # one per topic (up to 9) + buffer
+  extra_sources_per_cluster: 1
+  max_chars: 6000
   timeout_seconds: 12
 
-  compression:
-  key_sentences_per_cluster: 3
+compression:
+  key_sentences_per_cluster: 4
   max_tokens_per_cluster: 350
 
 groq:
   enabled: true
   max_daily_requests: 20
   max_tokens_per_digest: 6000
+  max_enrich_clusters: 3           # optional AI polish on top 3 stories only
 
 ntfy:
-  send_summary_notification: true     # one concise Top Stories push
-  send_per_section: true              # plus a push per section (Global, AI, etc.)
-  breaking_importance: 9              # importance >= this gets an urgent push
-  max_top_stories_in_summary: 6
+  send_summary_notification: true
+  max_stories_per_section: 1
+  summary_max_chars: 280              # auto-shrinks so all 9 topics fit in one push
+  max_body_chars: 3400

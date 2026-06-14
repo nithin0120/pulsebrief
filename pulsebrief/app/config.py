@@ -19,6 +19,7 @@ SOURCES_FILE = PROJECT_ROOT / "sources.yaml"
 CONFIG_FILE = PROJECT_ROOT / "config.yaml"
 PREFERENCES_FILE = PROJECT_ROOT / "preferences.yaml"
 ENV_FILE = PROJECT_ROOT / ".env"
+PUBLIC_DIR = PROJECT_ROOT / "public"
 DB_PATH = PROJECT_ROOT / "pulsebrief.db"
 
 
@@ -41,6 +42,7 @@ class Settings:
     ntfy_topic: str | None = None
     ntfy_server: str = "https://ntfy.sh"
     ntfy_token: str | None = None
+    brief_public_url: str | None = None
     digest_time: str = "08:00"
     digest_interval_hours: int = 6
     run_on_startup: bool = True
@@ -73,6 +75,7 @@ class Settings:
             ntfy_topic=os.getenv("NTFY_TOPIC") or None,
             ntfy_server=(os.getenv("NTFY_SERVER") or "https://ntfy.sh").rstrip("/"),
             ntfy_token=os.getenv("NTFY_TOKEN") or None,
+            brief_public_url=(os.getenv("BRIEF_PUBLIC_URL") or "").rstrip("/") or None,
             digest_time=os.getenv("DIGEST_TIME", "08:00"),
             digest_interval_hours=int(os.getenv("DIGEST_INTERVAL_HOURS", "6")),
             run_on_startup=(os.getenv("RUN_ON_STARTUP", "true").strip().lower() == "true"),
@@ -208,24 +211,34 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "ranking": {
         "max_final_clusters": 8,
         "min_final_clusters": 3,
-        "max_clusters_per_topic": 2,
+        "max_clusters_per_topic": 1,
         "max_articles_per_source": 2,
         "require_international": True,
+        "ensure_topic_diversity": True,
     },
     "extraction": {
         "enabled": True,
-        "max_finalist_full_text": 8,
+        "max_finalist_full_text": 12,
         "extra_sources_per_cluster": 1,
         "max_chars": 6000,
         "timeout_seconds": 12,
     },
     "compression": {"key_sentences_per_cluster": 5, "max_tokens_per_cluster": 700},
-    "groq": {"enabled": True, "max_daily_requests": 20, "max_tokens_per_digest": 6000},
+    "groq": {
+        "enabled": True,
+        "max_daily_requests": 20,
+        "max_tokens_per_digest": 6000,
+        "max_enrich_clusters": 3,
+    },
     "ntfy": {
         "send_summary_notification": True,
-        "send_per_section": True,
-        "breaking_importance": 9,
-        "max_top_stories_in_summary": 6,
+        "max_stories_per_section": 1,
+        "summary_max_chars": 280,
+        "max_body_chars": 3400,
+    },
+    "language": {
+        "enabled": True,
+        "allowed": ["en"],
     },
 }
 
@@ -272,6 +285,11 @@ def validate_settings(s: Settings | None = None) -> list[str]:
     channel = s.delivery_channel
     if channel == "ntfy" and not s.ntfy_topic:
         problems.append("DELIVERY_CHANNEL=ntfy but NTFY_TOPIC is empty — output will print to console.")
+    elif channel == "ntfy" and not s.brief_public_url:
+        problems.append(
+            "DELIVERY_CHANNEL=ntfy but BRIEF_PUBLIC_URL is empty — tap will show "
+            "truncated text instead of the full brief page."
+        )
     elif channel == "twilio" and not (
         s.twilio_account_sid and s.twilio_auth_token and s.twilio_from_number and s.twilio_to_number
     ):

@@ -8,18 +8,38 @@ import httpx
 
 from app.config import settings
 from app.models import Article
-from app.services.brief import format_ntfy_summary
+from app.services.brief import (
+    digest_notification_title,
+    format_ntfy_by_section,
+    format_ntfy_teaser,
+    is_breaking_story,
+)
 from app.services.twilio_sender import TwilioSender, _chunk_message
 
 logger = logging.getLogger(__name__)
 
-# ntfy.sh caps message bodies; keep chunks well under the limit.
+# ntfy.sh caps message bodies; the full brief lives on the web page (Click URL).
 MAX_NTFY_LEN = 3500
+
+
+def _action_url(url: str) -> str:
+    """ntfy Actions use commas as delimiters — escape any in the URL."""
+    return url.replace(",", "%2C").replace(";", "%2C")
 
 
 def _ascii_header(value: str) -> str:
     """ntfy headers must be latin-1 safe; strip anything that isn't."""
     return value.encode("ascii", "ignore").decode("ascii").strip() or "PulseBrief"
+
+
+def _brief_page_url(run_id: int | None = None) -> str | None:
+    base = settings.brief_public_url
+    if not base:
+        return None
+    if base.endswith(".html"):
+        return base
+    suffix = "brief.html" if not base.endswith("/") else "brief.html"
+    return f"{base.rstrip('/')}/{suffix}"
 
 
 class NtfySender(TwilioSender):
@@ -63,13 +83,24 @@ class NtfySender(TwilioSender):
         all_sent = True
         with httpx.Client(timeout=30.0) as client:
             for i, chunk in enumerate(chunks):
+                chunk_title = title if len(chunks) == 1 else f"{title} ({i + 1}/{len(chunks)})"
+                headers = {**base_headers, "Title": _ascii_header(chunk_title)}
                 try:
                     resp = client.post(
-                        url, content=chunk.encode("utf-8"), headers=base_headers
+                        url, content=chunk.encode("utf-8"), headers=headers
                     )
+                    if resp.status_code == 400 and "Actions" in headers:
+                        logger.warning(
+                            "ntfy rejected Actions header; retrying without buttons"
+                        )
+                        retry_headers = dict(headers)
+                        retry_headers.pop("Actions", None)
+                        resp = client.post(
+                            url, content=chunk.encode("utf-8"), headers=retry_headers
+                        )
                     resp.raise_for_status()
                     logger.info(
-                        "Published ntfy '%s' %d/%d to %s", title, i + 1, len(chunks), topic
+                        "Published ntfy '%s' %d/%d to %s", chunk_title, i + 1, len(chunks), topic
                     )
                 except Exception:
                     logger.exception("Failed to publish ntfy message chunk %d", i + 1)
@@ -91,15 +122,13 @@ class NtfySender(TwilioSender):
 
     @staticmethod
     def _action_label(article: Article, index: int) -> str:
-        # Commas/semicolons are ntfy Actions delimiters; strip them from labels.
         source = (article.source or "").replace(",", " ").replace(";", " ").strip()
         source = source[:22] if source else f"Story {index}"
         return f"Open: {source}"
 
     def _open_actions(self, articles: list[Article]) -> str | None:
-        """One 'Open' view-action button per article (ntfy caps actions at 3)."""
         actions = [
-            f"view, {self._action_label(article, i)}, {article.url}"
+            f"view, {self._action_label(article, i)}, {_action_url(article.url)}"
             for i, article in enumerate(articles[:3], 1)
             if article.url
         ]
@@ -110,64 +139,46 @@ class NtfySender(TwilioSender):
         brief: dict,
         finalists,
         ntfy_cfg: dict | None = None,
+        run_id: int | None = None,
     ) -> bool:
-        """Send concise summary + optional per-section pushes."""
+        """Thin ntfy banner; full brief opens in browser via Click URL."""
         cfg = ntfy_cfg or {}
-        any_sent = False
-        max_stories = int(cfg.get("max_top_stories_in_summary", 6))
-        breaking = int(cfg.get("breaking_importance", 9))
+        if not cfg.get("send_summary_notification", True):
+            return False
 
-        # Main summary notification
-        if cfg.get("send_summary_notification", True):
-            body = format_ntfy_summary(brief, max_stories=max_stories)
-            title = brief.get("brief_title", "Morning Brief")
-            date = brief.get("date", "")
-            click = None
-            stories = brief.get("top_stories") or []
-            if stories and stories[0].get("sources"):
-                click = stories[0]["sources"][0].get("url")
+        title = digest_notification_title(brief)
+        click = _brief_page_url(run_id)
+        stories = brief.get("top_stories") or []
+
+        if click:
+            body = format_ntfy_teaser()
+            actions = None
+            logger.info("ntfy tap opens full brief at %s", click)
+        else:
+            logger.warning(
+                "BRIEF_PUBLIC_URL not set — falling back to truncated in-app body. "
+                "Set BRIEF_PUBLIC_URL (e.g. GitHub Pages) for full summaries on tap."
+            )
+            max_per_section = int(cfg.get("max_stories_per_section", 1))
+            summary_max = int(cfg.get("summary_max_chars", 280))
+            max_body = int(cfg.get("max_body_chars", 3400))
+            body = format_ntfy_by_section(
+                brief,
+                max_per_section=max_per_section,
+                summary_max=summary_max,
+                max_body_chars=max_body,
+            )
             actions = self._brief_actions(stories)
-            if self._publish(
-                body,
-                title=f"{title} — {date}",
-                click=click,
-                priority=4 if len(stories) >= 3 else 3,
-                actions=actions,
-            ):
-                any_sent = True
 
-        # Urgent push for breaking clusters
-        for story in brief.get("top_stories", []):
-            if story.get("confidence") == "high" and len(story.get("sources", [])) >= 2:
-                url = story["sources"][0].get("url") if story.get("sources") else None
-                urgent = f"🔥 BREAKING [{story.get('topic')}]\n{story.get('headline')}\n{story.get('what_happened', '')[:200]}"
-                if self._publish(urgent, title="Breaking", click=url, priority=5):
-                    any_sent = True
-                break
-
-        # Per-section notifications (optional)
-        if cfg.get("send_per_section", True):
-            by_topic: dict[str, list] = {}
-            for story in brief.get("top_stories", []):
-                by_topic.setdefault(story.get("topic", "Other"), []).append(story)
-
-            for topic, stories in by_topic.items():
-                if len(by_topic) <= 1:
-                    continue
-                lines = []
-                for i, story in enumerate(stories, 1):
-                    lines.append(f"{story.get('headline', '')}")
-                    if story.get("what_happened"):
-                        lines.append(f"   {story['what_happened'][:160]}")
-                    srcs = story.get("sources") or []
-                    if srcs:
-                        lines.append(f"   Link: {srcs[0].get('url', '')}")
-                    lines.append("")
-                click = stories[0]["sources"][0].get("url") if stories and stories[0].get("sources") else None
-                if self._publish("\n".join(lines).strip(), title=topic, click=click, priority=3):
-                    any_sent = True
-
-        return any_sent
+        has_breaking = any(is_breaking_story(s) for s in stories)
+        priority = 5 if has_breaking else 3
+        return self._publish(
+            body,
+            title=title,
+            click=click,
+            priority=priority,
+            actions=actions,
+        )
 
     @staticmethod
     def _brief_actions(stories: list[dict]) -> str | None:
@@ -179,13 +190,13 @@ class NtfySender(TwilioSender):
             url = srcs[0].get("url")
             name = (srcs[0].get("name") or f"Story {i}")[:22].replace(",", " ")
             if url:
-                actions.append(f"view, Open: {name}, {url}")
+                actions.append(f"view, Open: {name}, {_action_url(url)}")
         return "; ".join(actions) if actions else None
 
     def send_topic_digest(self, topic: str, articles: list[Article]) -> bool:
         body = self.format_topic_articles(articles)
         lead = articles[0] if articles else None
-        click = lead.url if lead else None  # tapping the notification opens the top story
+        click = lead.url if lead else None
         return self._publish(
             body,
             title=topic,

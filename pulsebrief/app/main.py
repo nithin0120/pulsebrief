@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
-from app.config import load_topics, log_validation, settings
+from app.config import PUBLIC_DIR, load_topics, log_validation, settings
 from app.database import get_db, init_db
 from app.jobs.scheduler import start_scheduler, stop_scheduler
-from app.models import Article
+from app.models import Article, DigestRun
 from app.schemas import (
     ArticleDetailOut,
     ArticleOut,
@@ -22,6 +24,7 @@ from app.schemas import (
     TopicOut,
 )
 from app.services.digest_service import DigestService
+from app.services.brief_html import render_brief_html
 from app.services.slack_sender import parse_slack_command
 from app.services.twilio_sender import parse_command
 
@@ -81,6 +84,43 @@ async def run_digest(
         message=run.message,
         articles=[ArticleOut.model_validate(a) for a in articles],
     )
+
+
+@app.get("/digest/latest")
+def latest_digest_json(db: Session = Depends(get_db)) -> dict[str, Any]:
+    """Full brief JSON for the most recent completed run."""
+    run = (
+        db.query(DigestRun)
+        .filter(DigestRun.status == "completed")
+        .order_by(DigestRun.created_at.desc())
+        .first()
+    )
+    if not run or not run.brief_json:
+        raise HTTPException(status_code=404, detail="No brief available yet")
+    return json.loads(run.brief_json)
+
+
+@app.get("/brief", response_class=HTMLResponse)
+@app.get("/brief/latest", response_class=HTMLResponse)
+def brief_page(db: Session = Depends(get_db)) -> HTMLResponse:
+    """Mobile-friendly full brief — open this from the ntfy notification tap."""
+    static = PUBLIC_DIR / "brief.html"
+    if static.exists():
+        return HTMLResponse(static.read_text(encoding="utf-8"))
+
+    run = (
+        db.query(DigestRun)
+        .filter(DigestRun.status == "completed")
+        .order_by(DigestRun.created_at.desc())
+        .first()
+    )
+    if not run or not run.brief_json:
+        return HTMLResponse(
+            "<!DOCTYPE html><html><body><p>No brief yet. Run a digest first.</p></body></html>",
+            status_code=404,
+        )
+    brief = json.loads(run.brief_json)
+    return HTMLResponse(render_brief_html(brief, run.id))
 
 
 @app.get("/digest/history")

@@ -2,17 +2,24 @@ name: PulseBrief Digest
 
 on:
   schedule:
-    # Check every 15 min, but only actually run if >= MIN_INTERVAL_HOURS have
-    # passed since the last real run (see the "Decide whether to run" step). The
-    # frequent ticks make us resilient to GitHub dropping scheduled runs; the
-    # guard skips in seconds so the extra ticks are cheap (repo is public =
-    # unlimited Actions minutes). Net effect: "every ~6h since the last run".
     - cron: "*/15 * * * *"
   workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pulsebrief-pages
+  cancel-in-progress: false
 
 jobs:
   digest:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     defaults:
       run:
         working-directory: pulsebrief
@@ -32,6 +39,7 @@ jobs:
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
       NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+      BRIEF_PUBLIC_URL: https://nithin0120.github.io/pulsebrief/brief.html
     steps:
       - uses: actions/checkout@v4
 
@@ -87,6 +95,21 @@ jobs:
       - name: Run digest
         if: steps.decide.outputs.run == 'true'
         run: python cli.py run
+
+      - name: Setup GitHub Pages
+        if: steps.decide.outputs.run == 'true'
+        uses: actions/configure-pages@v4
+
+      - name: Upload brief page
+        if: steps.decide.outputs.run == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: pulsebrief/public
+
+      - name: Deploy brief to GitHub Pages
+        if: steps.decide.outputs.run == 'true'
+        id: deployment
+        uses: actions/deploy-pages@v4
 
       # Record "now" as the last real run, then persist it for the next check.
       - name: Update last-run marker
