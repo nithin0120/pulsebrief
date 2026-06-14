@@ -1,19 +1,16 @@
 # PulseBrief
 
-A local-first personal **news intelligence agent**. PulseBrief fetches news for topics you choose, triages and ranks it, writes rich AI summaries, groups related coverage into story clusters, and delivers a daily intelligence brief to your phone — learning from what you save and ignore over time.
+A local-first personal **news intelligence agent**. PulseBrief fetches news across your topics, scores and clusters it locally, writes extractive summaries (with optional Groq polish), and delivers a thin ntfy push that opens a full brief page on your phone.
 
 ## Features
 
-- **Multi-source ingestion** — NewsAPI + GDELT (supplement) + RSS feeds + Hacker News via modular connectors in `sources.yaml`
-- **Local-first pipeline** — fetch 100–300 articles → normalize → dedupe (rapidfuzz) → score → TF-IDF cluster → rank clusters → extract text for finalists only → **ONE batched Groq call** for the full brief
+- **Multi-source ingestion** — NewsAPI + GDELT (supplement) + RSS feeds + Hacker News via `sources.yaml`
+- **Local-first pipeline** — fetch → normalize → dedupe → score → per-topic TF-IDF cluster → one story per topic → extract text → extractive brief → optional Groq polish on top stories
 - **Groq budget manager** — daily request/token caps; `explain`/`compare` only on demand
-- **Story clustering** — related articles grouped with shared source links and conflict flags
-- **Personalized memory** — `save`/`ignore` interactions (SQLite) plus git-portable mutes/preferences (`preferences.yaml`) that also apply to your cloud runs
-- **Daily intelligence brief** — Top Stories → per-topic sections → Watchlist
-- **AI summarization** via Groq (free) or OpenAI, with an extractive fallback and a failure queue
-- **Pluggable delivery** — ntfy (free push, with priority + action button), Twilio (SMS/WhatsApp), Slack, or console
-- **Two-way + local commands** — `more`, `full`, `explain`, `today`, `topics`, `history`, `save`, `ignore`
-- **REST API** via FastAPI; **recurring scheduling** locally (APScheduler) or in the cloud (GitHub Actions)
+- **Personalized memory** — `save`/`ignore` interactions (SQLite) plus git-portable mutes in `preferences.yaml`
+- **Thin ntfy + full brief page** — short push notification; tap opens GitHub Pages with full summaries and source links
+- **Pluggable delivery** — ntfy (free), Twilio, Slack, or console
+- **CLI + REST API** — local runs, FastAPI endpoints, APScheduler or GitHub Actions scheduling
 
 ## Requirements
 
@@ -62,6 +59,7 @@ A local-first personal **news intelligence agent**. PulseBrief fetches news for 
    | `NTFY_TOPIC` | Unique ntfy topic to publish to (subscribe to it in the ntfy app) |
    | `NTFY_SERVER` | ntfy server (default `https://ntfy.sh`) |
    | `NTFY_TOKEN` | Optional ntfy auth token (for reserved/protected topics) |
+   | `BRIEF_PUBLIC_URL` | URL opened when you tap the ntfy notification (GitHub Pages or local `/brief`) |
    | `TWILIO_ACCOUNT_SID` | Twilio Account SID |
    | `TWILIO_AUTH_TOKEN` | Twilio Auth Token |
    | `TWILIO_FROM_NUMBER` | Sender number. SMS: `+1...`; WhatsApp: `whatsapp:+...` |
@@ -71,11 +69,6 @@ A local-first personal **news intelligence agent**. PulseBrief fetches news for 
    | `DIGEST_INTERVAL_HOURS` | Run the digest every N hours (default: 6) |
    | `RUN_ON_STARTUP` | If `true`, run a digest ~10s after the server starts |
    | `TIMEZONE` | IANA timezone, e.g. `America/Los_Angeles` |
-   | `MAX_ARTICLES_PER_TOPIC` | Max stories per topic in the final brief (default: 3) |
-   | `MAX_TOTAL_ARTICLES` | Max total candidates considered across all topics (default: 40) |
-   | `MAX_PER_SOURCE` | Max stories any single outlet can contribute (default: 2) |
-   | `CANDIDATES_PER_TOPIC` | Candidates pulled per topic before AI triage (default: 6) |
-   | `MIN_IMPORTANCE` | Drop anything the AI scores below this importance, 1–10 (default: 7) |
 
 5. **Customize** `topics.yaml`, `sources.yaml`, `config.yaml`, and `preferences.yaml`.
 
@@ -90,17 +83,17 @@ A local-first personal **news intelligence agent**. PulseBrief fetches news for 
 
 ## Groq free-tier strategy
 
-PulseBrief processes **hundreds of articles locally** but sends **one compact batched request** to Groq for the final intelligence brief:
+PulseBrief processes **hundreds of articles locally** and uses **at most one Groq call per digest** (optional polish on the top 3 stories):
 
 1. Fetch up to 300 articles (NewsAPI + RSS + GDELT supplement + HN)
-2. Normalize, dedupe, score, and TF-IDF cluster **without any LLM**
-3. Select top 4–6 story clusters
-4. Extract full article text **only for finalists** (trafilatura)
-5. Compress each cluster to ~350 tokens of context
-6. **One Groq call** produces the full Morning Brief JSON
-7. `explain`, `compare`, `more`, `full` use **cached data**; Groq only if you request deeper analysis
+2. Normalize, dedupe, score, and TF-IDF cluster **per topic** (no LLM)
+3. Pick the best story per topic (9 categories)
+4. Extract full article text for those leaders
+5. Build extractive paragraph summaries locally (free, unlimited)
+6. Optionally polish the top 3 with **one Groq call**
+7. Export `public/brief.html` and send a thin ntfy push with a tap-through link
 
-Daily caps (`GROQ_MAX_DAILY_REQUESTS=20`) prevent runaway usage. If Groq fails or is over budget, a local extractive fallback still delivers a digest.
+Pipeline limits (fetch caps, clustering thresholds, Groq budget) live in `config.yaml`.
 
 ## Setting up ntfy (free default delivery)
 
@@ -223,38 +216,18 @@ Restart the server after changes (topics are loaded on each digest run).
 
 ## How It Works
 
-1. **Fetch** — For each topic, query NewsAPI or GDELT for recent English articles (with retry + rate-limit handling).
-2. **Deduplicate** — Drop duplicates by canonical URL (tracking params stripped), similar titles, and similar descriptions.
-3. **Filter + rank** — Remove muted keywords/sources; score by recency, relevance, reputation, diversity, and your saved/ignored history. Hard caps per source and per topic.
-4. **Triage (cheap)** — One batched AI call scores every candidate's importance (1–10) and category. Anything below `MIN_IMPORTANCE` or with no clear category is dropped.
-5. **Summarize (rich)** — Only the finalists get a full structured summary (`tldr`, `why_it_matters`, `bias_or_angle`, `key_entities`, `background`, `what_changed_today`, `what_to_watch_next`, …). Failures go to a retry queue and fall back to extractive summaries.
-6. **Cluster** — Group related stories, attach 2–4 source links, flag multi-outlet coverage.
-7. **Store** — Persist articles, clusters, interactions, and run history in SQLite (`pulsebrief.db`).
-8. **Deliver** — Send per-topic pushes (ntfy includes priority + an Open Article button) or print the full Morning Brief.
+1. **Fetch** — NewsAPI, RSS, GDELT, and HN connectors in `sources.yaml` pull recent English articles per topic.
+2. **Normalize + filter** — Canonical URLs, junk removal, language filter, mute preferences.
+3. **Dedupe** — rapidfuzz title/URL deduplication.
+4. **Score** — Local importance scoring (recency, source reputation, topic match, your save/ignore history).
+5. **Cluster** — TF-IDF clustering within each topic so categories don't steal each other's slots.
+6. **Select** — Best story per topic with US-news relevance checks.
+7. **Summarize** — Extractive local brief; optional Groq polish on top stories.
+8. **Deliver** — Export static brief page + single ntfy push (tap opens full report).
 
-## Digest Format (Morning Brief)
+## Digest Format
 
-```
-Morning Brief — Saturday, June 13, 2026
-
-TOP STORIES
-1. [Tech] phpBB forum fixes auth bypass bug lurking for a decade (importance 9)
-   A 10-year-old authentication bypass vulnerability was discovered...
-
-CYBERSECURITY
-- China-Linked Hackers Backdoored Linux Login Software... [Opinion/Analysis]
-  Source: The Hacker News
-  TLDR: …
-  Why it matters: …
-  Link: …
-
-WATCHLIST
-- Likely to develop: …
-- Underreported: …
-- Conflicting reports: …
-```
-
-Per-topic phone notifications use the topic as the title and a numbered, source-labeled body; reply (Twilio/Slack) or run locally with `more <n>`, `full <n>`, `explain <n>`.
+The phone notification is a short title (e.g. `Good Afternoon - News Report 06/14/2026`). Tapping opens the full brief page with one section per topic, paragraph summaries, and source buttons.
 
 ## Project Structure
 
@@ -262,56 +235,54 @@ Per-topic phone notifications use the topic as the title and a numbered, source-
 pulsebrief/
   app/
     main.py              # FastAPI app
-    config.py            # Settings and topics loader
+    config.py            # Settings and YAML loaders
     database.py          # SQLAlchemy setup
     models.py            # ORM models
     schemas.py           # Pydantic schemas
     services/
-      news_fetcher.py    # NewsAPI + GDELT, canonical URLs, dedup, opinion detection
-      summarizer.py      # Triage + rich Groq/OpenAI summaries + explain()
-      ranker.py          # Ranking with caps, reputation, memory/preference signals
-      clustering.py      # Story clustering (no extra LLM calls)
-      brief.py           # Morning Brief formatter
-      preferences.py     # Mutes / topic edits (preferences.yaml, topics.yaml)
-      memory.py          # save/ignore interactions + summary-failure queue (SQLite)
+      digest_service.py  # Pipeline orchestration
+      pipeline/          # fetch → brief stages (scorer, clustering, local_brief, …)
+      sources/           # NewsAPI, GDELT, RSS, HN connectors
+      news_fetcher.py    # NewsAPI/GDELT fetch + URL normalization
+      brief.py           # Brief formatting
+      brief_html.py      # Static HTML brief page
+      brief_generator.py # Optional Groq polish
+      preferences.py     # Mutes / topic edits
+      memory.py          # save/ignore interactions
       sender.py          # Delivery channel factory
-      ntfy_sender.py     # ntfy push delivery (priority + action button)
-      twilio_sender.py   # Twilio SMS/WhatsApp delivery + formatting
+      ntfy_sender.py     # ntfy push delivery
+      twilio_sender.py   # Twilio SMS/WhatsApp
       slack_sender.py    # Slack delivery
-      digest_service.py  # Orchestration
     jobs/
-      scheduler.py       # Recurring APScheduler job
+      scheduler.py       # APScheduler
   cli.py
   topics.yaml
-  preferences.yaml       # your mutes/preferences (committed, used by cloud runs too)
-  requirements.txt
-  .env.example
-  README.md
+  sources.yaml
+  config.yaml
+  preferences.yaml
+  public/                # generated brief page (gitignored)
 ```
 
 ## Troubleshooting
 
 | Symptom | Cause / Fix |
 |---------|-------------|
-| `429 Too Many Requests` from Groq | Free-tier per-minute limit. Use `GROQ_MODEL=llama-3.1-8b-instant`, lower `CANDIDATES_PER_TOPIC`, or wait a minute — the client retries automatically. |
-| Summaries look generic / lack insight | No working AI key — set `GROQ_API_KEY`. Without it, PulseBrief uses an extractive fallback (no importance, category, or bias). |
-| `database is locked` | Two processes hit SQLite at once. Avoid running the CLI while the API server is also running a digest; the engine waits up to 30s. |
-| Few or no stories delivered | `MIN_IMPORTANCE` may be too strict, or mutes too broad. Lower `MIN_IMPORTANCE` or check `preferences.yaml`. |
-| Cloud digest ignores my mutes | Mutes live in `preferences.yaml` — commit and push it so the GitHub Actions runner picks it up. |
-| NewsAPI returns nothing | Missing/invalid `NEWS_API_KEY` (falls back to GDELT) or rate-limited; check logs. |
+| `429 Too Many Requests` from Groq | Free-tier per-minute limit. Wait a minute or lower `GROQ_MAX_DAILY_REQUESTS`. |
+| `429` from NewsAPI | Free tier rate-limits rapid queries. RSS feeds still work; runs are spaced 6h apart in cloud. |
+| Summaries look generic | No `GROQ_API_KEY` — extractive summaries still work; Groq only polishes top stories. |
+| `database is locked` | Avoid running CLI and API server digests simultaneously. |
+| Few topics in brief | Check logs for rate limits or broken RSS feeds in `sources.yaml`. |
+| Cloud digest ignores mutes | Commit and push `preferences.yaml`. |
+| ntfy tap shows truncated text | Set `BRIEF_PUBLIC_URL` and enable GitHub Pages. |
 
 On startup and on `python cli.py run`, PulseBrief logs any configuration problems (missing keys, incomplete delivery setup) so you know what's degraded.
 
 ## Future Improvements
 
 - Email digest delivery
-- Web UI for topic management and article browsing
-- Per-topic delivery schedules
-- RSS feed support
-- LLM-assisted clustering and explicit conflict detection across sources
-- Multi-user support with separate topic profiles
+- Web UI for topic management
+- NewsAPI query batching to reduce rate limits
 - Docker Compose packaging
-- Slack interactive buttons / ntfy Save & Ignore actions via a hosted endpoint
 
 ## License
 

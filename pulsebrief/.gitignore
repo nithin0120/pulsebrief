@@ -5,3 +5,5 @@ __pycache__/
 pulsebrief.db
 *.egg-info/
 .DS_Store
+logs/
+public/

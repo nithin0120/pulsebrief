@@ -23,14 +23,6 @@ logger = logging.getLogger(__name__)
 _TRACKING_PREFIXES = ("utm_", "fbclid", "gclid", "mc_", "ref", "cmpid", "icid")
 _OPINION_MARKERS = ("opinion", "op-ed", "editorial", "analysis", "commentary", "/opinion/")
 
-REPUTABLE_SOURCES = {
-    "reuters", "associated press", "ap news", "bbc", "bbc news", "the guardian",
-    "the new york times", "nytimes", "wall street journal", "wsj", "financial times",
-    "bloomberg", "the economist", "npr", "pbs", "al jazeera", "cnn", "the washington post",
-    "politico", "axios", "nature", "science", "techcrunch", "arstechnica", "wired",
-    "the verge", "mit technology review", "hindustan times", "the indian express",
-}
-
 USER_AGENT = "PulseBrief/1.0 (local news digest)"
 
 # Map registrable domains to clean, human outlet names. Covers the messy/bare
@@ -175,12 +167,6 @@ def text_similarity(a: str, b: str) -> float:
 
 def titles_are_similar(a: str, b: str, threshold: float = 0.82) -> bool:
     return text_similarity(normalize_title(a), normalize_title(b)) >= threshold
-
-
-def is_reputable_source(source: str) -> bool:
-    return source.lower().strip() in REPUTABLE_SOURCES or any(
-        rep in source.lower() for rep in REPUTABLE_SOURCES
-    )
 
 
 def deduplicate_articles(articles: list[RawArticle]) -> list[RawArticle]:

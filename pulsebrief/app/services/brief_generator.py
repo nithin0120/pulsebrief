@@ -11,7 +11,7 @@ from typing import Any
 from app.config import settings
 from app.services.pipeline.article import ClusterContext
 from app.services.pipeline.fallback import build_fallback_brief
-from app.services.summarizer import _extract_json
+from app.services.json_utils import extract_json
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +107,7 @@ class BriefGenerator:
                 response_format={"type": "json_object"},
             )
             content = resp.choices[0].message.content or ""
-            return _extract_json(content), content, est_in, _estimate_tokens(content)
+            return extract_json(content), content, est_in, _estimate_tokens(content)
 
         try:
             data, content, est_in, est_out = _call(payload)
@@ -162,7 +162,7 @@ class BriefGenerator:
                 max_tokens=900,
                 response_format={"type": "json_object"},
             )
-            data = _extract_json(response.choices[0].message.content or "")
+            data = extract_json(response.choices[0].message.content or "")
             if not data:
                 return None
             lines = ["Deep explainer:"]
@@ -200,7 +200,7 @@ class BriefGenerator:
                 max_tokens=700,
                 response_format={"type": "json_object"},
             )
-            data = _extract_json(response.choices[0].message.content or "")
+            data = extract_json(response.choices[0].message.content or "")
             if not data:
                 return None
             lines = ["Source comparison:"]

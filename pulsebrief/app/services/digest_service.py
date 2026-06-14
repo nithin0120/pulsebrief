@@ -330,6 +330,25 @@ class DigestService:
             self.db.query(DigestRun).order_by(DigestRun.created_at.desc()).limit(limit).all()
         )
 
+    def get_latest_clusters(self) -> list[StoryCluster]:
+        run = self._latest_completed_run()
+        if not run:
+            return []
+        return (
+            self.db.query(StoryCluster)
+            .filter(StoryCluster.digest_run_id == run.id)
+            .order_by(StoryCluster.id)
+            .all()
+        )
+
+    def get_recent_articles(self, limit: int = 20) -> list[Article]:
+        return (
+            self.db.query(Article)
+            .order_by(Article.fetched_at.desc())
+            .limit(limit)
+            .all()
+        )
+
     def get_stats(self) -> dict[str, Any]:
         run = self._latest_completed_run()
         budget = self.budget.stats()

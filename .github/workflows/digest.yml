@@ -28,10 +28,6 @@ jobs:
       DELIVERY_CHANNEL: ntfy
       NTFY_SERVER: https://ntfy.sh
       TIMEZONE: America/Los_Angeles
-      MAX_ARTICLES_PER_TOPIC: "3"
-      MAX_TOTAL_ARTICLES: "40"
-      CANDIDATES_PER_TOPIC: "6"
-      MIN_IMPORTANCE: "7"
       GROQ_MODEL: llama-3.1-8b-instant
       GROQ_DEEP_MODEL: llama-3.3-70b-versatile
       GROQ_MAX_DAILY_REQUESTS: "20"

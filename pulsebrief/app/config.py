@@ -47,11 +47,6 @@ class Settings:
     digest_interval_hours: int = 6
     run_on_startup: bool = True
     timezone: str = "America/Los_Angeles"
-    max_articles_per_topic: int = 3
-    max_total_articles: int = 40
-    candidates_per_topic: int = 6
-    max_per_source: int = 2
-    min_importance: int = 6
     database_url: str = f"sqlite:///{DB_PATH}"
 
     @classmethod
@@ -80,11 +75,6 @@ class Settings:
             digest_interval_hours=int(os.getenv("DIGEST_INTERVAL_HOURS", "6")),
             run_on_startup=(os.getenv("RUN_ON_STARTUP", "true").strip().lower() == "true"),
             timezone=os.getenv("TIMEZONE", "America/Los_Angeles"),
-            max_articles_per_topic=int(os.getenv("MAX_ARTICLES_PER_TOPIC", "3")),
-            max_total_articles=int(os.getenv("MAX_TOTAL_ARTICLES", "40")),
-            candidates_per_topic=int(os.getenv("CANDIDATES_PER_TOPIC", "6")),
-            max_per_source=int(os.getenv("MAX_PER_SOURCE", "2")),
-            min_importance=int(os.getenv("MIN_IMPORTANCE", "6")),
         )
 
 
@@ -296,9 +286,6 @@ def validate_settings(s: Settings | None = None) -> list[str]:
         problems.append("DELIVERY_CHANNEL=twilio but Twilio credentials are incomplete.")
     elif channel == "slack" and not (s.slack_bot_token and s.slack_channel_id):
         problems.append("DELIVERY_CHANNEL=slack but Slack credentials are incomplete.")
-
-    if not (1 <= s.min_importance <= 10):
-        problems.append(f"MIN_IMPORTANCE={s.min_importance} is outside 1-10.")
 
     return problems
 

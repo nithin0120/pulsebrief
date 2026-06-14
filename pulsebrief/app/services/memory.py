@@ -1,4 +1,4 @@
-"""Local interaction memory and summary-failure queue (SQLite-backed)."""
+"""Local interaction memory (SQLite-backed)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from collections import Counter
 
 from sqlalchemy.orm import Session
 
-from app.models import ArticleInteraction, SummaryFailure
+from app.models import ArticleInteraction
 
 logger = logging.getLogger(__name__)
 
@@ -63,20 +63,3 @@ class InteractionMemory:
         if self.saved_topics.get(topic.lower(), 0) >= 2:
             mult *= 1.2
         return mult
-
-
-def queue_summary_failure(
-    db: Session, *, title: str, url: str, provider: str | None, error: str
-) -> None:
-    db.add(SummaryFailure(title=title[:512], url=url, provider=provider, error=error[:1000]))
-    db.commit()
-
-
-def recent_failures(db: Session, limit: int = 20) -> list[SummaryFailure]:
-    return (
-        db.query(SummaryFailure)
-        .filter(SummaryFailure.resolved == False)  # noqa: E712
-        .order_by(SummaryFailure.created_at.desc())
-        .limit(limit)
-        .all()
-    )

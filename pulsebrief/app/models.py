@@ -110,17 +110,3 @@ class ArticleInteraction(Base):
     topic: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     action: Mapped[str] = mapped_column(String(32), nullable=False, index=True)  # saved/ignored/clicked
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-
-
-class SummaryFailure(Base):
-    """Queue of articles whose AI summarization failed, for later retry/inspection."""
-
-    __tablename__ = "summary_failures"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    title: Mapped[str] = mapped_column(String(512), nullable=False)
-    url: Mapped[str] = mapped_column(String(2048), nullable=False)
-    provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    resolved: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
