@@ -237,8 +237,9 @@ class NewsFetcher:
             follow_redirects=True,
         ) as client:
             for i, topic in enumerate(topics):
-                if i > 0 and not self.use_newsapi:
-                    await asyncio.sleep(3.0)
+                if i > 0:
+                    # NewsAPI free tier rate-limits rapid sequential queries.
+                    await asyncio.sleep(2.0 if self.use_newsapi else 3.0)
                 try:
                     if self.use_newsapi:
                         articles = await self._fetch_newsapi(client, topic)

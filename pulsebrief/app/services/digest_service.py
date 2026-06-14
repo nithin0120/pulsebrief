@@ -116,7 +116,7 @@ class DigestService:
 
         # Stage 6: One top story per topic (guaranteed category coverage)
         ranker = ClusterRanker(self.config)
-        per_topic = ranker.select_per_topic(clusters, topics)
+        per_topic = ranker.select_per_topic(clusters, topics, articles)
 
         if not per_topic:
             run.status = "completed"

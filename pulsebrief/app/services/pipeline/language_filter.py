@@ -34,11 +34,14 @@ def _sample_text(article: PipelineArticle) -> str:
 
 
 def _has_non_latin_script(text: str) -> bool:
-    """True for CJK, Cyrillic, Arabic, etc. Latin extended (café) is allowed."""
+    """True for CJK, Cyrillic, Arabic, etc. Smart quotes and em dashes are OK."""
     for ch in text:
         if ch.isascii():
             continue
-        if ord(ch) <= 0x024F:
+        o = ord(ch)
+        if o <= 0x024F:  # Latin extended (café, etc.)
+            continue
+        if 0x2000 <= o <= 0x206F:  # punctuation — curly quotes, en/em dash
             continue
         return True
     return False

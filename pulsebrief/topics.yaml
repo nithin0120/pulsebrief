@@ -15,9 +15,9 @@ topics:
   - name: US News
     priority: 4
     max_clusters: 2
-    keywords: [US news, United States, Congress, White House, Supreme Court, American politics]
-    negative_keywords: []
-    queries: [US news OR Congress OR White House]
+    keywords: [Congress, White House, Supreme Court, Senate, federal government, United States, American politics]
+    negative_keywords: [Britain, British, UK parliament, Westminster]
+    queries: [Congress OR "White House" OR "Supreme Court" OR Senate]
     source_preferences: [Associated Press, NPR, Politico, Reuters]
 
   - name: AI

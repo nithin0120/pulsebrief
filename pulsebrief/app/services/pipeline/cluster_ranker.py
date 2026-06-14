@@ -2,14 +2,31 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 
 from app.config import TopicConfig, load_config
-from app.services.pipeline.article import StoryClusterData
+from app.services.pipeline.article import PipelineArticle, StoryClusterData
+from app.services.pipeline.scorer import topic_fits, _topic_match
 
 logger = logging.getLogger(__name__)
 
 INTERNATIONAL_TOPICS = {"world news", "geopolitics", "international"}
+
+
+def _cluster_key(title: str) -> str:
+    return hashlib.sha1(title.lower().encode()).hexdigest()[:16]
+
+
+def _singleton_cluster(article: PipelineArticle) -> StoryClusterData:
+    return StoryClusterData(
+        cluster_id=_cluster_key(article.title),
+        cluster_title=article.title,
+        topic=article.topic,
+        articles=[article],
+        importance_score=article.importance_score,
+        is_opinion=article.is_opinion,
+    )
 
 
 class ClusterRanker:
@@ -155,17 +172,38 @@ class ClusterRanker:
         self,
         clusters: list[StoryClusterData],
         topics: list[TopicConfig],
+        articles: list[PipelineArticle] | None = None,
     ) -> list[StoryClusterData]:
         """Best cluster per configured topic — backbone of the daily brief."""
         ranked = sorted(clusters, key=self._cluster_score, reverse=True)
-        best_by_topic: dict[str, StoryClusterData] = {}
+        by_topic: dict[str, list[StoryClusterData]] = {}
         for cluster in ranked:
-            if cluster.topic not in best_by_topic:
-                best_by_topic[cluster.topic] = cluster
+            by_topic.setdefault(cluster.topic, []).append(cluster)
+
+        articles_by_topic: dict[str, list[PipelineArticle]] = {}
+        if articles:
+            for article in sorted(articles, key=lambda a: a.importance_score, reverse=True):
+                articles_by_topic.setdefault(article.topic, []).append(article)
 
         leaders: list[StoryClusterData] = []
         for topic in sorted(topics, key=lambda t: t.priority, reverse=True):
-            leader = best_by_topic.get(topic.name)
+            leader: StoryClusterData | None = None
+            for cluster in by_topic.get(topic.name, []):
+                rep = cluster.representative or cluster.articles[0]
+                if topic_fits(rep, topic):
+                    leader = cluster
+                    break
+            if not leader:
+                for article in articles_by_topic.get(topic.name, []):
+                    if topic_fits(article, topic):
+                        leader = _singleton_cluster(article)
+                        break
+            # US: if nothing domestic enough, still show top NPR story that isn't UK-tagged junk.
+            if not leader and topic.name.lower() == "us news":
+                for article in articles_by_topic.get(topic.name, []):
+                    if _topic_match(article, topic) >= 0:
+                        leader = _singleton_cluster(article)
+                        break
             if leader:
                 leaders.append(leader)
 

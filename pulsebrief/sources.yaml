@@ -45,6 +45,12 @@ sources:
     url: https://feeds.npr.org/1001/rss.xml
     reputation: 0.85
     enabled: true
+  - name: NPR Business
+    type: rss
+    category: Finance
+    url: https://feeds.npr.org/1006/rss.xml
+    reputation: 0.85
+    enabled: true
   - name: Al Jazeera
     type: rss
     category: World News
@@ -67,10 +73,22 @@ sources:
     url: http://export.arxiv.org/rss/cs.AI
     reputation: 0.7
     enabled: true
+  - name: MIT Tech Review AI
+    type: rss
+    category: AI
+    url: https://www.technologyreview.com/topic/artificial-intelligence/feed/
+    reputation: 0.8
+    enabled: true
   - name: TechCrunch
     type: rss
     category: Tech
     url: https://techcrunch.com/feed/
+    reputation: 0.7
+    enabled: true
+  - name: TechCrunch Startups
+    type: rss
+    category: Startups
+    url: https://techcrunch.com/category/startups/feed/
     reputation: 0.7
     enabled: true
   - name: The Verge
@@ -98,6 +116,20 @@ sources:
     category: Cybersecurity
     url: https://www.bleepingcomputer.com/feed/
     reputation: 0.8
+    enabled: true
+
+  # --- Finance / Markets RSS ---
+  - name: MarketWatch
+    type: rss
+    category: Markets
+    url: https://feeds.marketwatch.com/marketwatch/topstories/
+    reputation: 0.8
+    enabled: true
+  - name: CNBC Top News
+    type: rss
+    category: Finance
+    url: https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114
+    reputation: 0.85
     enabled: true
 
   # --- Hacker News (Algolia front page) ---

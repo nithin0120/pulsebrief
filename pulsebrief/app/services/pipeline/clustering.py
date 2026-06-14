@@ -35,6 +35,27 @@ class StoryClusterer:
     def cluster(self, articles: list[PipelineArticle]) -> list[StoryClusterData]:
         if not articles:
             return []
+        # Cluster within each topic so stories don't steal slots from other categories.
+        by_topic: dict[str, list[PipelineArticle]] = {}
+        for article in articles:
+            by_topic.setdefault(article.topic, []).append(article)
+
+        clusters: list[StoryClusterData] = []
+        for group in by_topic.values():
+            clusters.extend(self._cluster_group(group))
+
+        clusters.sort(key=lambda c: c.importance_score, reverse=True)
+        logger.info(
+            "Clustered %d articles into %d story clusters (%d topics)",
+            len(articles),
+            len(clusters),
+            len(by_topic),
+        )
+        return clusters
+
+    def _cluster_group(self, articles: list[PipelineArticle]) -> list[StoryClusterData]:
+        if not articles:
+            return []
         if len(articles) == 1:
             a = articles[0]
             return [
@@ -108,5 +129,4 @@ class StoryClusterer:
             )
 
         clusters.sort(key=lambda c: c.importance_score, reverse=True)
-        logger.info("Clustered %d articles into %d story clusters", len(articles), len(clusters))
         return clusters
