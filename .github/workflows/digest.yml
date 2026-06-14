@@ -2,11 +2,12 @@ name: PulseBrief Digest
 
 on:
   schedule:
-    # Check hourly, but only actually run if >= MIN_INTERVAL_HOURS have passed
-    # since the last real run (see the "Decide whether to run" step). This gives
-    # "every 6h since the last run" instead of fixed clock times, and is robust
-    # to GitHub's best-effort scheduling delays.
-    - cron: "0 * * * *"
+    # Check every 15 min, but only actually run if >= MIN_INTERVAL_HOURS have
+    # passed since the last real run (see the "Decide whether to run" step). The
+    # frequent ticks make us resilient to GitHub dropping scheduled runs; the
+    # guard skips in seconds so the extra ticks are cheap (repo is public =
+    # unlimited Actions minutes). Net effect: "every ~6h since the last run".
+    - cron: "*/15 * * * *"
   workflow_dispatch: {}
 
 jobs:
