@@ -71,6 +71,31 @@ class DigestRun(Base):
     cluster_count: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(32), default="completed")
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    brief_json: Mapped[str | None] = mapped_column(Text, nullable=True)  # cached intelligence brief
+    groq_requests: Mapped[int] = mapped_column(Integer, default=0)
+    fetched_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class GroqUsageLog(Base):
+    __tablename__ = "groq_usage_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    purpose: Mapped[str] = mapped_column(String(32), nullable=False)  # digest/explain/compare
+    model: Mapped[str] = mapped_column(String(64), nullable=False)
+    estimated_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    estimated_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    success: Mapped[bool] = mapped_column(Boolean, default=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ExtractedText(Base):
+    __tablename__ = "extracted_texts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    url: Mapped[str] = mapped_column(String(2048), nullable=False, index=True)
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class ArticleInteraction(Base):

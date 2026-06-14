@@ -52,6 +52,9 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     },
     "digest_runs": {
         "cluster_count": "INTEGER DEFAULT 0",
+        "brief_json": "TEXT",
+        "groq_requests": "INTEGER DEFAULT 0",
+        "fetched_count": "INTEGER DEFAULT 0",
     },
 }
 

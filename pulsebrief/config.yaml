@@ -1,0 +1,62 @@
+# Tuning for the local processing pipeline. All values have sensible defaults
+# in code; this file overrides them.
+
+fetch:
+  max_articles_per_source: 30     # cap per RSS/aggregator query
+  max_total_articles: 300         # hard cap on fetched candidates per run
+  newsapi_page_size: 30
+  refetch_skip_hours: 6           # skip URLs already fetched within this window
+
+dedup:
+  fuzzy_title_threshold: 88       # rapidfuzz token_set_ratio (0-100)
+  description_threshold: 90
+
+clustering:
+  similarity_threshold: 0.22      # cosine similarity on TF-IDF to merge stories
+  min_df: 1
+  max_features: 4000
+  fuzzy_fallback_threshold: 80    # rapidfuzz title fallback when vectors are sparse
+
+scoring:
+  weights:
+    topic_priority: 1.0
+    source_reputation: 1.2
+    recency: 1.5
+    multi_source_bonus: 2.0       # per extra independent source in a cluster
+    keyword_importance: 1.3
+    user_preference: 1.0
+    international_bonus: 0.8
+    muted_keyword_penalty: 5.0
+    low_quality_source_penalty: 1.5
+    opinion_penalty: 0.6
+  recency_half_life_hours: 18     # recency score decays with this half-life
+  low_quality_sources: [biztoc, slashdot, msn]
+
+  ranking:
+  max_final_clusters: 6           # top clusters sent to Groq / shown in brief
+  min_final_clusters: 3
+  max_clusters_per_topic: 2       # unless flagged as a major breaking event
+  max_articles_per_source: 2
+  require_international: true      # try to include >=1 international story
+
+extraction:
+  enabled: true
+  max_finalist_full_text: 8       # only fetch full text for this many clusters
+  extra_sources_per_cluster: 1    # also extract N additional sources per cluster
+  max_chars: 6000                 # truncate extracted text
+  timeout_seconds: 12
+
+  compression:
+  key_sentences_per_cluster: 3
+  max_tokens_per_cluster: 350
+
+groq:
+  enabled: true
+  max_daily_requests: 20
+  max_tokens_per_digest: 6000
+
+ntfy:
+  send_summary_notification: true     # one concise Top Stories push
+  send_per_section: true              # plus a push per section (Global, AI, etc.)
+  breaking_importance: 9              # importance >= this gets an urgent push
+  max_top_stories_in_summary: 6

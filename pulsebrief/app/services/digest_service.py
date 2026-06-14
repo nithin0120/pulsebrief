@@ -1,24 +1,39 @@
-"""Orchestrate fetch, rank, summarize, cluster, store, and deliver the digest."""
+"""Orchestrate the multi-stage local pipeline + one batched Groq brief."""
 
 from __future__ import annotations
 
 import json
 import logging
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.config import load_topics, settings
-from app.models import Article, DigestRun, StoryCluster
+from app.config import load_config, load_topics
+from app.models import Article, DigestRun, ExtractedText, StoryCluster
 from app.services import memory as memory_mod
-from app.services.brief import format_brief
-from app.services.clustering import cluster_items
+from app.services.brief import (
+    format_brief_json,
+    format_story_full,
+    format_story_more,
+    format_story_sources,
+)
+from app.services.brief_generator import BriefGenerator
+from app.services.groq_budget import GroqBudgetManager
 from app.services.memory import InteractionMemory
-from app.services.news_fetcher import RawArticle, normalize_title
+from app.services.news_fetcher import normalize_title
+from app.services.pipeline.article import PipelineArticle, StoryClusterData
+from app.services.pipeline.cluster_ranker import ClusterRanker
+from app.services.pipeline.clustering import StoryClusterer
+from app.services.pipeline.compressor import ContextCompressor
+from app.services.pipeline.deduper import deduplicate_articles
+from app.services.pipeline.extractor import ArticleExtractor
+from app.services.pipeline.junk_filter import filter_junk
+from app.services.pipeline.normalizer import normalize_all
+from app.services.pipeline.scorer import score_all
 from app.services.preferences import PreferenceFilter
-from app.services.ranker import Ranker
 from app.services.sender import get_sender
-from app.services.summarizer import ArticleSummary, Summarizer
+from app.services.sources.orchestrator import FetchOrchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -26,187 +41,167 @@ logger = logging.getLogger(__name__)
 class DigestService:
     def __init__(self, db: Session) -> None:
         self.db = db
-        self.ranker = Ranker()
-        self.summarizer = Summarizer()
+        self.config = load_config()
+        self.brief_gen = BriefGenerator()
+        self.budget = GroqBudgetManager(db, self.config)
         self.sender = get_sender()
+        self._last_brief: dict[str, Any] | None = None
+        self._last_contexts: list[dict] = []
+        self._last_extracted: dict[str, str] = {}
+        self._stats: dict[str, Any] = {}
 
     async def run_digest(self, send: bool = True) -> DigestRun:
         topics = load_topics()
         if not topics:
-            run = DigestRun(status="failed", message="No topics configured", article_count=0)
+            run = DigestRun(status="failed", message="No topics configured")
             self.db.add(run)
             self.db.commit()
             return run
 
         prefs = PreferenceFilter()
         mem = InteractionMemory(self.db)
+        dedup_cfg = self.config.get("dedup", {})
 
-        from app.services.news_fetcher import NewsFetcher
-
-        fetcher = NewsFetcher()
-        raw_articles = await fetcher.fetch_for_topics(topics)
-
-        before = len(raw_articles)
-        raw_articles = [
-            a for a in raw_articles if not prefs.is_muted(a.title, a.description, a.source)
-        ]
-        if before != len(raw_articles):
-            logger.info("Muted filter removed %d articles", before - len(raw_articles))
-
-        categories = [t.name for t in topics]
-        topic_keywords_map = {t.name: t.keywords or t.queries for t in topics}
-        candidate_total = settings.candidates_per_topic * max(len(topics), 1)
-        selected = self.ranker.select_for_digest(
-            raw_articles,
-            topic_keywords_map,
-            per_topic=settings.candidates_per_topic,
-            total=candidate_total,
-            prefs=prefs,
-            memory=mem,
-        )
-
-        run = DigestRun(status="running", article_count=0)
+        run = DigestRun(status="running")
         self.db.add(run)
         self.db.flush()
 
-        # Stage 1: cheap batched triage to pick finalists worth full summaries.
-        finalists = self._triage_and_select(selected, categories)
-        # Stage 2: full rich summaries for finalists only.
-        final = self._summarize_finalists(finalists)
+        # Stage 1: Fetch
+        fetcher = FetchOrchestrator(self.db, self.config)
+        raw = await fetcher.fetch_all(topics)
+        run.fetched_count = len(raw)
 
-        clusters = cluster_items(final)
-        cluster_key_by_url = {
-            raw.url: cluster.key for cluster in clusters for raw, _, _ in cluster.members
-        }
+        # Stage 2: Normalize + junk filter
+        articles = filter_junk(normalize_all(raw))
 
-        stored: list[Article] = []
-        for position, (raw, score, summary) in enumerate(final, start=1):
-            raw.topic = summary.category or raw.topic
-            article = self._store_article(raw, score, summary, run.id, position)
-            article.cluster_key = cluster_key_by_url.get(raw.url)
-            stored.append(article)
+        # Mute filter
+        before = len(articles)
+        articles = [a for a in articles if not prefs.is_muted(a.title, a.description, a.source)]
+        if before != len(articles):
+            logger.info("Muted filter removed %d articles", before - len(articles))
 
-        self._store_clusters(clusters, run.id)
+        # Stage 3: Dedup
+        articles = deduplicate_articles(
+            articles,
+            fuzzy_title_threshold=int(dedup_cfg.get("fuzzy_title_threshold", 88)),
+            description_threshold=int(dedup_cfg.get("description_threshold", 90)),
+        )
 
-        run.article_count = len(stored)
-        run.cluster_count = len(clusters)
+        # Stage 4: Score
+        articles = score_all(articles, topics, prefs=prefs, memory=mem, config=self.config)
+
+        # Stage 5: Cluster
+        clusters = StoryClusterer(self.config).cluster(articles)
+
+        # Stage 6: Rank clusters
+        finalists = ClusterRanker(self.config).select(clusters, topics)
+
+        # Stage 7: Extract full text for finalists only
+        extracted = ArticleExtractor(self.config).enrich_clusters(finalists)
+        self._persist_extracted(extracted)
+
+        # Stage 8: Compress contexts (cap count for Groq TPM budget)
+        max_for_groq = min(len(finalists), 4)
+        contexts = ContextCompressor(self.config).build_contexts(
+            finalists, extracted, max_clusters=max_for_groq
+        )
+        self._last_contexts = [c.to_dict() for c in contexts]
+        self._last_extracted = extracted
+
+        # Stage 9: ONE batched Groq call (or fallback)
+        groq_used = 0
+        if self.budget.can_request("digest"):
+            brief, est_in, est_out = self.brief_gen.generate_digest(
+                contexts,
+                clusters_for_fallback=finalists,
+                max_tokens=self.budget.max_tokens_per_digest,
+            )
+            groq_used = 1
+            self.budget.record(
+                purpose="digest",
+                model=self.brief_gen._model,
+                input_tokens=est_in,
+                output_tokens=est_out,
+                success=not brief.get("fallback"),
+            )
+        else:
+            from app.services.pipeline.fallback import build_fallback_brief
+
+            brief = build_fallback_brief(contexts, finalists)
+
+        self._last_brief = brief
+
+        # Persist articles + clusters + digest run
+        self._store_pipeline_results(run, finalists, brief)
+
+        run.article_count = len(brief.get("top_stories", []))
+        run.cluster_count = len(finalists)
+        run.groq_requests = groq_used
+        run.brief_json = json.dumps(brief, ensure_ascii=False)
         run.status = "completed"
         run.message = (
-            f"{len(stored)} stories in {len(clusters)} clusters "
-            f"(from {len(selected)} candidates, min importance {settings.min_importance})"
+            f"Fetched {run.fetched_count} -> {len(articles)} after dedup -> "
+            f"{len(finalists)} finalist clusters; Groq calls: {groq_used}"
         )
         self.db.commit()
 
-        if send and stored:
-            self._deliver_by_topic(stored)
+        self._stats = {
+            "fetched": run.fetched_count,
+            "after_dedup": len(articles),
+            "clusters": len(clusters),
+            "finalists": len(finalists),
+            "groq_requests": groq_used,
+            "tokens_saved_estimate": max(0, len(articles) - len(finalists)) * 800,
+        }
+
+        if send and brief.get("top_stories"):
+            self._deliver_brief(brief, finalists)
 
         logger.info("Digest run %d completed: %s", run.id, run.message)
         return run
 
-    def _triage_and_select(self, selected, categories):
-        """Triage candidates cheaply, drop low-importance/off-topic, cap per topic.
+    def _persist_extracted(self, extracted: dict[str, str]) -> None:
+        for url, text in extracted.items():
+            row = self.db.query(ExtractedText).filter(ExtractedText.url == url).first()
+            if row:
+                row.text = text
+            else:
+                self.db.add(ExtractedText(url=url, text=text))
+        self.db.flush()
 
-        Returns a list of (raw, score, importance, category) finalists.
-        """
-        raws = [raw for raw, _ in selected]
-        triage = self.summarizer.triage(raws, categories)
+    def _store_pipeline_results(
+        self,
+        run: DigestRun,
+        finalists: list[StoryClusterData],
+        brief: dict[str, Any],
+    ) -> None:
+        story_map = {s.get("cluster_id"): s for s in brief.get("top_stories", [])}
 
-        kept: list[tuple] = []
-        dropped = 0
-        for (raw, score), tr in zip(selected, triage):
-            importance, category = tr.importance, tr.category
-
-            if importance is not None and importance < settings.min_importance:
-                dropped += 1
-                continue
-            if category is None:
-                if importance is not None:
-                    dropped += 1  # AI assessed it but found no clear category
-                    continue
-                category = raw.topic  # triage unavailable: keep original topic
-
-            kept.append((raw, score, importance, category))
-
-        # Cap per category, keeping the most important.
-        by_topic: dict[str, list[tuple]] = {}
-        for item in kept:
-            by_topic.setdefault(item[3], []).append(item)
-
-        finalists: list[tuple] = []
-        for _topic, items in by_topic.items():
-            items.sort(key=lambda x: (x[2] or 0, x[1]), reverse=True)
-            finalists.extend(items[: settings.max_articles_per_topic])
-
-        finalists.sort(key=lambda x: (x[2] or 0, x[1]), reverse=True)
-        logger.info(
-            "Triage: %d candidates -> kept %d, dropped %d, %d finalists",
-            len(selected), len(kept), dropped, len(finalists),
-        )
-        return finalists
-
-    def _summarize_finalists(self, finalists):
-        """Full rich summary for each finalist (the only expensive AI calls)."""
-        final: list[tuple[RawArticle, float, ArticleSummary]] = []
-        for raw, score, importance, category in finalists:
-            summary = self.summarizer.summarize(raw, [category] if category else None)
-
-            if summary.is_fallback and self.summarizer.provider != "none":
-                memory_mod.queue_summary_failure(
-                    self.db,
-                    title=raw.title,
-                    url=raw.url,
-                    provider=self.summarizer.provider,
-                    error="AI summary failed; used extractive fallback",
-                )
-
-            # Triage is the source of truth for importance/category; the rich
-            # summary fills them in only when triage had nothing.
-            summary.importance = importance if importance is not None else summary.importance
-            summary.category = category or summary.category or raw.topic
-            final.append((raw, score, summary))
-        return final
-
-    def _deliver_by_topic(self, articles: list[Article]) -> None:
-        by_topic: dict[str, list[Article]] = {}
-        for article in articles:
-            by_topic.setdefault(article.topic, []).append(article)
-
-        any_sent = False
-        for topic, topic_articles in by_topic.items():
-            if self.sender.send_topic_digest(topic, topic_articles):
-                any_sent = True
-
-        if not any_sent:
-            logger.info(
-                "Digest saved locally; %s delivery skipped or failed",
-                settings.delivery_channel,
-            )
-            print("\n" + format_brief(articles, when=datetime.now()) + "\n")
-
-    def _store_clusters(self, clusters, digest_run_id: int) -> None:
-        for cluster in clusters:
+        for i, cluster in enumerate(finalists, 1):
+            story = story_map.get(i, {})
+            links = [{"source": s, "url": a.url} for s, a in zip(cluster.source_names, cluster.articles)]
             self.db.add(
                 StoryCluster(
-                    digest_run_id=digest_run_id,
-                    cluster_key=cluster.key,
-                    title=cluster.title,
+                    digest_run_id=run.id,
+                    cluster_key=cluster.cluster_id,
+                    title=cluster.cluster_title,
                     topic=cluster.topic,
-                    importance=cluster.importance,
-                    summary=cluster.summary,
-                    what_happened_today=cluster.what_happened_today,
-                    why_it_matters=cluster.why_it_matters,
-                    source_links=json.dumps(cluster.source_links),
-                    conflicting_details=cluster.conflicting_details,
+                    importance=int(cluster.importance_score),
+                    summary=story.get("what_happened"),
+                    what_happened_today=story.get("what_happened"),
+                    why_it_matters=story.get("why_it_matters"),
+                    source_links=json.dumps(links),
+                    conflicting_details=(story.get("source_comparison") or {}).get("differences"),
                 )
             )
 
-    def _store_article(
-        self,
-        raw: RawArticle,
-        score: float,
-        summary: ArticleSummary,
-        digest_run_id: int,
-        position: int,
+            if cluster.representative:
+                rep = cluster.representative
+                article = self._upsert_article(rep, run.id, i, story)
+                rep.db_id = article.id
+
+    def _upsert_article(
+        self, raw: PipelineArticle, digest_run_id: int, position: int, story: dict
     ) -> Article:
         article = self.db.query(Article).filter(Article.url == raw.url).first()
         if not article:
@@ -214,7 +209,7 @@ class DigestService:
             self.db.add(article)
 
         article.title = raw.title
-        article.title_normalized = normalize_title(raw.title)
+        article.title_normalized = raw.title_normalized or normalize_title(raw.title)
         article.canonical_url = raw.canonical_url
         article.source = raw.source
         article.description = raw.description
@@ -223,23 +218,52 @@ class DigestService:
         article.is_opinion = raw.is_opinion
         article.published_at = raw.published_at
         article.fetched_at = datetime.utcnow()
-        article.rank_score = score
-        article.importance = summary.importance
-        article.tldr = summary.tldr
-        article.why_it_matters = summary.why_it_matters
-        article.bias_or_angle = summary.bias_or_angle
-        article.key_entities = json.dumps(summary.key_entities)
-        article.follow_up_question = summary.follow_up_question
-        article.background = summary.background
-        article.what_changed_today = summary.what_changed_today
-        article.what_to_watch_next = summary.what_to_watch_next
-        article.long_summary = summary.long_summary
+        article.rank_score = raw.importance_score
+        article.importance = int(raw.importance_score)
+        article.cluster_key = raw.article_id
+        article.tldr = story.get("what_happened")
+        article.why_it_matters = story.get("why_it_matters")
+        article.background = story.get("background")
+        article.what_changed_today = story.get("what_happened")
+        article.what_to_watch_next = story.get("what_to_watch_next")
+        article.long_summary = story.get("background")
         article.digest_run_id = digest_run_id
         article.digest_position = position
         self.db.flush()
         return article
 
-    # --- Read helpers ---------------------------------------------------------
+    def _deliver_brief(self, brief: dict[str, Any], finalists: list[StoryClusterData]) -> None:
+        ntfy_cfg = self.config.get("ntfy", {})
+        if hasattr(self.sender, "send_intelligence_brief"):
+            sent = self.sender.send_intelligence_brief(brief, finalists, ntfy_cfg)
+            if sent:
+                return
+
+        # Console fallback
+        print("\n" + format_brief_json(brief) + "\n")
+
+    def _load_latest_brief(self) -> dict[str, Any] | None:
+        if self._last_brief:
+            return self._last_brief
+        run = self._latest_completed_run()
+        if run and run.brief_json:
+            try:
+                return json.loads(run.brief_json)
+            except json.JSONDecodeError:
+                return None
+        return None
+
+    def _story_by_position(self, position: int) -> dict[str, Any] | None:
+        brief = self._load_latest_brief()
+        if not brief:
+            return None
+        for story in brief.get("top_stories", []):
+            if story.get("cluster_id") == position:
+                return story
+        stories = brief.get("top_stories", [])
+        if 1 <= position <= len(stories):
+            return stories[position - 1]
+        return None
 
     def _latest_completed_run(self) -> DigestRun | None:
         return (
@@ -249,6 +273,144 @@ class DigestService:
             .first()
         )
 
+    def today_brief(self) -> str:
+        brief = self._load_latest_brief()
+        return format_brief_json(brief)
+
+    def get_history(self, limit: int = 10) -> list[DigestRun]:
+        return (
+            self.db.query(DigestRun).order_by(DigestRun.created_at.desc()).limit(limit).all()
+        )
+
+    def get_stats(self) -> dict[str, Any]:
+        run = self._latest_completed_run()
+        budget = self.budget.stats()
+        return {
+            **self._stats,
+            "latest_run_id": run.id if run else None,
+            "latest_fetched": run.fetched_count if run else 0,
+            "latest_finalists": run.cluster_count if run else 0,
+            "groq_budget": budget,
+        }
+
+    def explain_position(self, position: int) -> str:
+        story = self._story_by_position(position)
+        if not story:
+            return f"No story at position {position}."
+        ctx = next((c for c in self._last_contexts if c.get("cluster_id") == position), None)
+        if not ctx:
+            ctx = {"headline": story.get("headline"), **story}
+        if self.budget.can_request("explain"):
+            result = self.brief_gen.generate_explain(ctx)
+            if result:
+                self.budget.record(purpose="explain", model=self.brief_gen._model, success=True)
+                return f"Explain #{position}\n\n{result}"
+        return format_story_more(story)
+
+    def compare_position(self, position: int) -> str:
+        story = self._story_by_position(position)
+        if not story:
+            return f"No story at position {position}."
+        ctx = next((c for c in self._last_contexts if c.get("cluster_id") == position), None) or story
+        if self.budget.can_request("compare"):
+            result = self.brief_gen.generate_compare(ctx)
+            if result:
+                self.budget.record(purpose="compare", model=self.brief_gen._model, success=True)
+                return result
+        comp = story.get("source_comparison") or {}
+        lines = [f"Compare #{position}: {story.get('headline', '')}", ""]
+        for k in ("agreement", "differences", "framing_or_bias"):
+            if comp.get(k):
+                lines.append(f"{k.replace('_', ' ').title()}: {comp[k]}")
+        return "\n".join(lines) if len(lines) > 2 else "Not enough source data to compare."
+
+    def sources_position(self, position: int) -> str:
+        story = self._story_by_position(position)
+        if not story:
+            return f"No story at position {position}."
+        return format_story_sources(story)
+
+    def handle_command(self, command: str, arg: int | None = None) -> str:
+        cmd = command.replace("-", " ")
+        if cmd == "today":
+            return self.today_brief()
+        if cmd == "history":
+            return self._format_history()
+        if cmd == "stats":
+            return self._format_stats()
+        if cmd == "more" and arg:
+            story = self._story_by_position(arg)
+            return format_story_more(story) if story else f"No story at #{arg}."
+        if cmd == "full" and arg:
+            story = self._story_by_position(arg)
+            if not story:
+                return f"No story at #{arg}."
+            extracted: dict[str, str] = {}
+            for s in story.get("sources", []):
+                url = s.get("url")
+                if not url:
+                    continue
+                row = self.db.query(ExtractedText).filter(ExtractedText.url == url).first()
+                if row and row.text:
+                    extracted[url] = row.text
+            return format_story_full(story, extracted or self._last_extracted)
+        if cmd == "explain" and arg:
+            return self.explain_position(arg)
+        if cmd == "compare" and arg:
+            return self.compare_position(arg)
+        if cmd == "sources" and arg:
+            return self.sources_position(arg)
+        if cmd == "save" and arg:
+            return self.record_action(arg, "saved")
+        if cmd == "ignore" and arg:
+            return self.record_action(arg, "ignored")
+        return "Unknown command."
+
+    def record_action(self, position: int, action: str) -> str:
+        story = self._story_by_position(position)
+        if not story:
+            return f"No story at position {position}."
+        url = (story.get("sources") or [{}])[0].get("url", "")
+        memory_mod.record_interaction(
+            self.db,
+            article_url=url or story.get("headline", ""),
+            action=action,
+            title_normalized=normalize_title(story.get("headline", "")),
+            source=(story.get("sources") or [{}])[0].get("name"),
+            topic=story.get("topic"),
+        )
+        verb = {"saved": "Saved", "ignored": "Ignored"}.get(action, action)
+        return f"{verb} #{position}: {story.get('headline', '')}"
+
+    def _format_history(self) -> str:
+        runs = self.get_history()
+        if not runs:
+            return "No digest history yet."
+        lines = ["Digest history:"]
+        for run in runs:
+            lines.append(
+                f"#{run.id} {run.created_at:%Y-%m-%d %H:%M} — "
+                f"fetched {run.fetched_count}, {run.cluster_count} clusters, "
+                f"{run.article_count} stories ({run.status})"
+            )
+        return "\n".join(lines)
+
+    def _format_stats(self) -> str:
+        s = self.get_stats()
+        b = s.get("groq_budget", {})
+        lines = [
+            "PulseBrief stats",
+            f"Latest run: #{s.get('latest_run_id')}",
+            f"Fetched (last run): {s.get('latest_fetched', 0)}",
+            f"Finalist clusters: {s.get('latest_finalists', 0)}",
+            f"Groq requests today: {b.get('requests_today', 0)} / {b.get('max_daily_requests', 20)}",
+            f"Est. tokens today: {b.get('tokens_today', 0)}",
+            f"Est. tokens saved (last run): ~{s.get('tokens_saved_estimate', 0)}",
+            f"Groq failures (7d): {b.get('failures_last_7d', 0)}",
+        ]
+        return "\n".join(lines)
+
+    # Legacy API compatibility
     def get_latest_digest_articles(self) -> list[Article]:
         run = self._latest_completed_run()
         if not run:
@@ -260,131 +422,12 @@ class DigestService:
             .all()
         )
 
-    def get_latest_clusters(self) -> list[StoryCluster]:
+    def get_article_by_digest_position(self, position: int) -> Article | None:
         run = self._latest_completed_run()
         if not run:
-            return []
+            return None
         return (
-            self.db.query(StoryCluster)
-            .filter(StoryCluster.digest_run_id == run.id)
-            .order_by(StoryCluster.importance.desc())
-            .all()
+            self.db.query(Article)
+            .filter(Article.digest_run_id == run.id, Article.digest_position == position)
+            .first()
         )
-
-    def get_article_by_digest_position(self, position: int) -> Article | None:
-        for article in self.get_latest_digest_articles():
-            if article.digest_position == position:
-                return article
-        return None
-
-    def get_recent_articles(self, limit: int = 20) -> list[Article]:
-        return (
-            self.db.query(Article).order_by(Article.fetched_at.desc()).limit(limit).all()
-        )
-
-    def get_history(self, limit: int = 10) -> list[DigestRun]:
-        return (
-            self.db.query(DigestRun).order_by(DigestRun.created_at.desc()).limit(limit).all()
-        )
-
-    def today_brief(self) -> str:
-        return format_brief(self.get_latest_digest_articles(), self.get_latest_clusters())
-
-    # --- Interaction / memory -------------------------------------------------
-
-    def record_action(self, position: int, action: str) -> str:
-        article = self.get_article_by_digest_position(position)
-        if not article:
-            return f"No article at position {position} in the latest digest."
-        memory_mod.record_interaction(
-            self.db,
-            article_url=article.url,
-            action=action,
-            title_normalized=article.title_normalized,
-            source=article.source,
-            topic=article.topic,
-        )
-        verb = {"saved": "Saved", "ignored": "Ignored", "clicked": "Noted"}.get(action, action)
-        return f"{verb} #{position}: {article.title}"
-
-    def explain_position(self, position: int) -> str:
-        article = self.get_article_by_digest_position(position)
-        if not article:
-            return f"No article at position {position} in the latest digest."
-        deep = self.summarizer.explain(article)
-        if deep is None:
-            # No AI available — assemble from stored fields.
-            return "\n".join(
-                [
-                    f"Explain #{position}: {article.title}",
-                    f"Source: {article.source}",
-                    "",
-                    f"Background: {article.background or article.long_summary or 'N/A'}",
-                    f"What happened today: {article.what_changed_today or article.tldr or 'N/A'}",
-                    f"Why it matters: {article.why_it_matters or 'N/A'}",
-                    "Who benefits: (needs AI; set GROQ_API_KEY)",
-                    "Who is hurt: (needs AI; set GROQ_API_KEY)",
-                    f"What to watch next: {article.what_to_watch_next or 'N/A'}",
-                ]
-            )
-        return "\n".join(
-            [
-                f"Explain #{position}: {article.title}",
-                f"Source: {article.source}",
-                f"Link: {article.url}",
-                "",
-                f"Background: {deep.background}",
-                f"What happened today: {deep.what_happened_today}",
-                f"Why it matters: {deep.why_it_matters}",
-                f"Who benefits: {deep.who_benefits}",
-                f"Who is hurt: {deep.who_is_hurt}",
-                f"What to watch next: {deep.what_to_watch_next}",
-            ]
-        )
-
-    def handle_command(self, command: str, arg: int | None = None) -> str:
-        cmd = command.replace("-", " ")
-
-        if cmd == "topics":
-            return self.sender.format_topics([t.name for t in load_topics()])
-        if cmd == "today":
-            return self.today_brief()
-        if cmd == "history":
-            return self._format_history()
-        if cmd == "run digest":
-            return "Use the API POST /digest/run or CLI: python cli.py run"
-        if cmd in ("more", "full", "explain", "save", "ignore") and arg is not None:
-            if cmd == "more":
-                article = self.get_article_by_digest_position(arg)
-                return (
-                    self.sender.format_more(article)
-                    if article
-                    else f"No article at position {arg}."
-                )
-            if cmd == "full":
-                article = self.get_article_by_digest_position(arg)
-                return (
-                    self.sender.format_full(article)
-                    if article
-                    else f"No article at position {arg}."
-                )
-            if cmd == "explain":
-                return self.explain_position(arg)
-            if cmd == "save":
-                return self.record_action(arg, "saved")
-            if cmd == "ignore":
-                return self.record_action(arg, "ignored")
-
-        return "Unknown command. Try: today | topics | history | more <n> | full <n> | explain <n>"
-
-    def _format_history(self) -> str:
-        runs = self.get_history()
-        if not runs:
-            return "No digest history yet."
-        lines = ["Digest history:"]
-        for run in runs:
-            lines.append(
-                f"#{run.id} {run.created_at:%Y-%m-%d %H:%M} — {run.article_count} stories "
-                f"({run.status})"
-            )
-        return "\n".join(lines)

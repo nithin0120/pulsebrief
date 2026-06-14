@@ -4,12 +4,9 @@ A local-first personal **news intelligence agent**. PulseBrief fetches news for 
 
 ## Features
 
-- **Topic configuration** via `topics.yaml`
-- **News sourcing** from NewsAPI (primary) or GDELT (fallback), with rate-limit handling
-- **Strong deduplication** — canonical URLs (tracking params stripped), similar titles, and similar descriptions
-- **Source diversity** — hard caps per source and per topic, reputable-source boost, opinion/analysis labeling
-- **Two-stage AI** — a cheap batched *triage* scores importance/category for all candidates, then full rich summaries are written only for the finalists (keeps you under free-tier token limits)
-- **Rich structured summaries** — `tldr`, `why_it_matters`, `bias_or_angle`, `key_entities`, `follow_up_question`, `background`, `what_changed_today`, `what_to_watch_next`
+- **Multi-source ingestion** — NewsAPI + GDELT (supplement) + RSS feeds + Hacker News via modular connectors in `sources.yaml`
+- **Local-first pipeline** — fetch 100–300 articles → normalize → dedupe (rapidfuzz) → score → TF-IDF cluster → rank clusters → extract text for finalists only → **ONE batched Groq call** for the full brief
+- **Groq budget manager** — daily request/token caps; `explain`/`compare` only on demand
 - **Story clustering** — related articles grouped with shared source links and conflict flags
 - **Personalized memory** — `save`/`ignore` interactions (SQLite) plus git-portable mutes/preferences (`preferences.yaml`) that also apply to your cloud runs
 - **Daily intelligence brief** — Top Stories → per-topic sections → Watchlist
@@ -55,7 +52,10 @@ A local-first personal **news intelligence agent**. PulseBrief fetches news for 
    | Variable | Description |
    |----------|-------------|
    | `GROQ_API_KEY` | Groq key for free AI summaries (used first when set). Get one at [console.groq.com/keys](https://console.groq.com/keys) |
-   | `GROQ_MODEL` | Groq model (default `llama-3.1-8b-instant` — high free-tier limits) |
+   | `GROQ_MODEL` | Cheap model for the single batched daily brief (`llama-3.1-8b-instant`) |
+   | `GROQ_DEEP_MODEL` | Stronger model for on-demand `explain`/`compare` only |
+   | `GROQ_MAX_DAILY_REQUESTS` | Hard cap on Groq API calls per day (default 20) |
+   | `GROQ_MAX_TOKENS_PER_DIGEST` | Max tokens for the batched brief request (default 6000) |
    | `OPENAI_API_KEY` | OpenAI key, used only if no Groq key (extractive fallback if empty/out of quota) |
    | `NEWS_API_KEY` | NewsAPI key (optional — uses GDELT if empty; a free key from [newsapi.org](https://newsapi.org) is recommended for reliable fetching) |
    | `DELIVERY_CHANNEL` | `ntfy` (default, free), `twilio`, `slack`, or `console` |
@@ -77,7 +77,30 @@ A local-first personal **news intelligence agent**. PulseBrief fetches news for 
    | `CANDIDATES_PER_TOPIC` | Candidates pulled per topic before AI triage (default: 6) |
    | `MIN_IMPORTANCE` | Drop anything the AI scores below this importance, 1–10 (default: 7) |
 
-5. **Customize topics** in `topics.yaml` (see below), and tune `preferences.yaml` (mutes/preferences).
+5. **Customize** `topics.yaml`, `sources.yaml`, `config.yaml`, and `preferences.yaml`.
+
+## Configuration files
+
+| File | Purpose |
+|------|---------|
+| `topics.yaml` | Topics, keywords, priority, max clusters, source preferences |
+| `sources.yaml` | RSS feeds, NewsAPI, GDELT, HN connectors (add/remove freely) |
+| `config.yaml` | Scoring weights, clustering thresholds, fetch limits, Groq/ntfy tuning |
+| `preferences.yaml` | Muted keywords/sources (commit to apply to cloud runs) |
+
+## Groq free-tier strategy
+
+PulseBrief processes **hundreds of articles locally** but sends **one compact batched request** to Groq for the final intelligence brief:
+
+1. Fetch up to 300 articles (NewsAPI + RSS + GDELT supplement + HN)
+2. Normalize, dedupe, score, and TF-IDF cluster **without any LLM**
+3. Select top 4–6 story clusters
+4. Extract full article text **only for finalists** (trafilatura)
+5. Compress each cluster to ~350 tokens of context
+6. **One Groq call** produces the full Morning Brief JSON
+7. `explain`, `compare`, `more`, `full` use **cached data**; Groq only if you request deeper analysis
+
+Daily caps (`GROQ_MAX_DAILY_REQUESTS=20`) prevent runaway usage. If Groq fails or is over budget, a local extractive fallback still delivers a digest.
 
 ## Setting up ntfy (free default delivery)
 
@@ -135,7 +158,10 @@ python cli.py topics              # list configured topics
 python cli.py history             # recent digest runs
 python cli.py more 1              # longer summary for story #1
 python cli.py full 1              # full brief (background, entities, bias) for #1
-python cli.py explain 1           # deep dive: background, who benefits, who is hurt, what to watch
+python cli.py explain 1           # deep dive (Groq on demand)
+python cli.py compare 1           # how sources frame the same story (Groq on demand)
+python cli.py sources 1           # all source links for story #1
+python cli.py stats             # pipeline + Groq usage stats
 ```
 
 **Teach it your preferences (memory):**

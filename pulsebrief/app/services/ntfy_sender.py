@@ -8,6 +8,7 @@ import httpx
 
 from app.config import settings
 from app.models import Article
+from app.services.brief import format_ntfy_summary
 from app.services.twilio_sender import TwilioSender, _chunk_message
 
 logger = logging.getLogger(__name__)
@@ -102,6 +103,83 @@ class NtfySender(TwilioSender):
             for i, article in enumerate(articles[:3], 1)
             if article.url
         ]
+        return "; ".join(actions) if actions else None
+
+    def send_intelligence_brief(
+        self,
+        brief: dict,
+        finalists,
+        ntfy_cfg: dict | None = None,
+    ) -> bool:
+        """Send concise summary + optional per-section pushes."""
+        cfg = ntfy_cfg or {}
+        any_sent = False
+        max_stories = int(cfg.get("max_top_stories_in_summary", 6))
+        breaking = int(cfg.get("breaking_importance", 9))
+
+        # Main summary notification
+        if cfg.get("send_summary_notification", True):
+            body = format_ntfy_summary(brief, max_stories=max_stories)
+            title = brief.get("brief_title", "Morning Brief")
+            date = brief.get("date", "")
+            click = None
+            stories = brief.get("top_stories") or []
+            if stories and stories[0].get("sources"):
+                click = stories[0]["sources"][0].get("url")
+            actions = self._brief_actions(stories)
+            if self._publish(
+                body,
+                title=f"{title} — {date}",
+                click=click,
+                priority=4 if len(stories) >= 3 else 3,
+                actions=actions,
+            ):
+                any_sent = True
+
+        # Urgent push for breaking clusters
+        for story in brief.get("top_stories", []):
+            if story.get("confidence") == "high" and len(story.get("sources", [])) >= 2:
+                url = story["sources"][0].get("url") if story.get("sources") else None
+                urgent = f"🔥 BREAKING [{story.get('topic')}]\n{story.get('headline')}\n{story.get('what_happened', '')[:200]}"
+                if self._publish(urgent, title="Breaking", click=url, priority=5):
+                    any_sent = True
+                break
+
+        # Per-section notifications (optional)
+        if cfg.get("send_per_section", True):
+            by_topic: dict[str, list] = {}
+            for story in brief.get("top_stories", []):
+                by_topic.setdefault(story.get("topic", "Other"), []).append(story)
+
+            for topic, stories in by_topic.items():
+                if len(by_topic) <= 1:
+                    continue
+                lines = []
+                for i, story in enumerate(stories, 1):
+                    lines.append(f"{story.get('headline', '')}")
+                    if story.get("what_happened"):
+                        lines.append(f"   {story['what_happened'][:160]}")
+                    srcs = story.get("sources") or []
+                    if srcs:
+                        lines.append(f"   Link: {srcs[0].get('url', '')}")
+                    lines.append("")
+                click = stories[0]["sources"][0].get("url") if stories and stories[0].get("sources") else None
+                if self._publish("\n".join(lines).strip(), title=topic, click=click, priority=3):
+                    any_sent = True
+
+        return any_sent
+
+    @staticmethod
+    def _brief_actions(stories: list[dict]) -> str | None:
+        actions = []
+        for i, story in enumerate(stories[:3], 1):
+            srcs = story.get("sources") or []
+            if not srcs:
+                continue
+            url = srcs[0].get("url")
+            name = (srcs[0].get("name") or f"Story {i}")[:22].replace(",", " ")
+            if url:
+                actions.append(f"view, Open: {name}, {url}")
         return "; ".join(actions) if actions else None
 
     def send_topic_digest(self, topic: str, articles: list[Article]) -> bool:

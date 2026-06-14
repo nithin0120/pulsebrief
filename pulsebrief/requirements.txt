@@ -10,3 +10,10 @@ python-dotenv>=1.0.0
 pyyaml>=6.0.0
 httpx>=0.27.0
 pydantic>=2.0.0
+# Multi-source ingestion + local processing pipeline
+feedparser>=6.0.0
+rapidfuzz>=3.6.0
+scikit-learn>=1.4.0
+trafilatura>=1.8.0
+readability-lxml>=0.8.1
+beautifulsoup4>=4.12.0

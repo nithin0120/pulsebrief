@@ -69,6 +69,21 @@ def cmd_explain(service: DigestService, args: argparse.Namespace) -> None:
 
 
 @_with_service
+def cmd_compare(service: DigestService, args: argparse.Namespace) -> None:
+    print(service.compare_position(args.number))
+
+
+@_with_service
+def cmd_sources(service: DigestService, args: argparse.Namespace) -> None:
+    print(service.sources_position(args.number))
+
+
+@_with_service
+def cmd_stats(service: DigestService, _: argparse.Namespace) -> None:
+    print(service._format_stats())
+
+
+@_with_service
 def cmd_history(service: DigestService, _: argparse.Namespace) -> None:
     print(service._format_history())
 
@@ -128,13 +143,16 @@ def main() -> None:
     sub.add_parser("today", help="Print the latest brief").set_defaults(func=cmd_today)
     sub.add_parser("topics", help="List configured topics").set_defaults(func=cmd_topics)
     sub.add_parser("history", help="Show recent digest runs").set_defaults(func=cmd_history)
+    sub.add_parser("stats", help="Show pipeline and Groq usage stats").set_defaults(func=cmd_stats)
 
     for name, fn, helptext in [
-        ("more", cmd_more, "Longer summary for digest article #"),
-        ("full", cmd_full, "Full brief for digest article #"),
-        ("explain", cmd_explain, "Deep explainer for digest article #"),
-        ("save", cmd_save, "Remember that you liked article #"),
-        ("ignore", cmd_ignore, "Down-rank article # and its source going forward"),
+        ("more", cmd_more, "Longer summary for digest story #"),
+        ("full", cmd_full, "Full brief for digest story #"),
+        ("explain", cmd_explain, "Deep explainer for digest story # (Groq on demand)"),
+        ("compare", cmd_compare, "Compare how sources frame story # (Groq on demand)"),
+        ("sources", cmd_sources, "List all source links for story #"),
+        ("save", cmd_save, "Remember that you liked story #"),
+        ("ignore", cmd_ignore, "Down-rank story # going forward"),
     ]:
         p = sub.add_parser(name, help=helptext)
         p.add_argument("number", type=int)

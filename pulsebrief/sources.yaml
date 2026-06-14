@@ -1,0 +1,111 @@
+# News sources. Add/remove freely; set enabled:false to disable without deleting.
+#   type        : newsapi | gdelt | rss | hn
+#   category    : the topic this source feeds (should match a topics.yaml name, or "mixed")
+#   reputation  : 0.0-1.0 credibility nudge used by local scoring
+#   perspective : optional note on geographic/political slant
+#   url         : RSS feed URL (rss) or HN endpoint (hn)
+sources:
+  # --- Aggregators (query-driven; topic comes from topics.yaml) ---
+  - name: NewsAPI
+    type: newsapi
+    category: mixed
+    reputation: 0.7
+    enabled: true
+
+  - name: GDELT
+    type: gdelt
+    category: mixed
+    reputation: 0.6
+    perspective: global
+    enabled: true
+
+  # --- World / general RSS ---
+  - name: Reuters World
+    type: rss
+    category: World News
+    url: https://www.reutersagency.com/feed/?best-topics=world&post_type=best
+    reputation: 0.95
+    enabled: true
+  - name: AP Top News
+    type: rss
+    category: US News
+    url: https://rsshub.app/apnews/topics/apf-topnews
+    reputation: 0.95
+    enabled: true
+  - name: BBC World
+    type: rss
+    category: World News
+    url: http://feeds.bbci.co.uk/news/world/rss.xml
+    reputation: 0.9
+    perspective: UK/global
+    enabled: true
+  - name: NPR News
+    type: rss
+    category: US News
+    url: https://feeds.npr.org/1001/rss.xml
+    reputation: 0.85
+    enabled: true
+  - name: Al Jazeera
+    type: rss
+    category: World News
+    url: https://www.aljazeera.com/xml/rss/all.xml
+    reputation: 0.8
+    perspective: Middle East/global
+    enabled: true
+  - name: The Guardian World
+    type: rss
+    category: World News
+    url: https://www.theguardian.com/world/rss
+    reputation: 0.85
+    perspective: UK/left-of-center
+    enabled: true
+
+  # --- AI / Tech RSS ---
+  - name: arXiv cs.AI
+    type: rss
+    category: AI
+    url: http://export.arxiv.org/rss/cs.AI
+    reputation: 0.7
+    enabled: true
+  - name: TechCrunch
+    type: rss
+    category: Tech
+    url: https://techcrunch.com/feed/
+    reputation: 0.7
+    enabled: true
+  - name: The Verge
+    type: rss
+    category: Tech
+    url: https://www.theverge.com/rss/index.xml
+    reputation: 0.75
+    enabled: true
+
+  # --- Cybersecurity RSS ---
+  - name: CISA Alerts
+    type: rss
+    category: Cybersecurity
+    url: https://www.cisa.gov/cybersecurity-advisories/all.xml
+    reputation: 0.95
+    enabled: true
+  - name: The Hacker News
+    type: rss
+    category: Cybersecurity
+    url: https://feeds.feedburner.com/TheHackersNews
+    reputation: 0.75
+    enabled: true
+  - name: BleepingComputer
+    type: rss
+    category: Cybersecurity
+    url: https://www.bleepingcomputer.com/feed/
+    reputation: 0.8
+    enabled: true
+
+  # --- Hacker News (Algolia front page) ---
+  - name: Hacker News
+    type: hn
+    category: Tech
+    url: https://hn.algolia.com/api/v1/search?tags=front_page
+    reputation: 0.6
+    enabled: true
+
+  # --- Optional connectors to add later (modular): reddit, youtube, substack ---

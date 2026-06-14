@@ -1,92 +1,155 @@
-"""Format a daily intelligence brief from stored articles and clusters."""
+"""Format intelligence brief JSON for CLI and ntfy."""
 
 from __future__ import annotations
 
 from collections import OrderedDict
 from datetime import datetime
+from typing import Any
 
-from app.models import Article, StoryCluster
+SECTION_EMOJI = {
+    "world news": "🌎 Global",
+    "us news": "🇺🇸 US",
+    "ai": "💻 AI & Tech",
+    "tech": "💻 AI & Tech",
+    "cybersecurity": "🛡️ Cybersecurity",
+    "finance": "💰 Markets",
+    "markets": "💰 Markets",
+    "startups": "🚀 Startups",
+    "science": "🔬 Science",
+}
 
 
-def _opinion_tag(article: Article) -> str:
-    return " [Opinion/Analysis]" if article.is_opinion else ""
+def _section_label(topic: str) -> str:
+    return SECTION_EMOJI.get(topic.lower(), topic)
 
 
-def format_brief(
-    articles: list[Article],
-    clusters: list[StoryCluster] | None = None,
-    when: datetime | None = None,
-) -> str:
-    when = when or datetime.now()
-    if not articles:
+def format_brief_json(brief: dict[str, Any] | None, when: datetime | None = None) -> str:
+    if not brief or not brief.get("top_stories"):
+        when = when or datetime.now()
         return f"Morning Brief — {when:%A, %B %d, %Y}\n\nNo stories met the bar today."
 
-    lines = [f"Morning Brief — {when:%A, %B %d, %Y}", ""]
+    date = brief.get("date") or datetime.utcnow().strftime("%Y-%m-%d")
+    lines = [f"Morning Brief — {date}", ""]
 
-    # Top Stories: the highest-importance items across all topics.
-    top = sorted(articles, key=lambda a: (a.importance or 0, a.rank_score or 0), reverse=True)[:5]
-    lines.append("TOP STORIES")
-    for i, article in enumerate(top, 1):
-        imp = f" (importance {article.importance})" if article.importance else ""
-        lines.append(f"{i}. [{article.topic}] {article.title}{_opinion_tag(article)}{imp}")
-        lines.append(f"   {article.tldr or ''}".rstrip())
-    lines.append("")
-
-    # Per-topic sections (only topics that have articles), most important first.
-    by_topic: "OrderedDict[str, list[Article]]" = OrderedDict()
-    for article in sorted(articles, key=lambda a: (a.importance or 0), reverse=True):
-        by_topic.setdefault(article.topic, []).append(article)
-
-    for topic, topic_articles in by_topic.items():
-        lines.append(topic.upper())
-        for article in topic_articles:
-            lines.append(f"- {article.title}{_opinion_tag(article)}")
-            lines.append(f"  Source: {article.source}")
-            if article.tldr:
-                lines.append(f"  TLDR: {article.tldr}")
-            if article.why_it_matters:
-                lines.append(f"  Why it matters: {article.why_it_matters}")
-            lines.append(f"  Link: {article.url}")
+    lines.append("🔥 Top Stories")
+    for i, story in enumerate(brief.get("top_stories", []), 1):
+        topic = story.get("topic", "")
+        lines.append(f"{i}. [{topic}] {story.get('headline', '')}")
+        if story.get("what_happened"):
+            lines.append(f"What happened: {story['what_happened']}")
+        if story.get("why_it_matters"):
+            lines.append(f"Why it matters: {story['why_it_matters']}")
+        if story.get("what_to_watch_next"):
+            lines.append(f"Watch next: {story['what_to_watch_next']}")
+        sources = story.get("sources") or []
+        if sources:
+            names = ", ".join(s.get("name", "") for s in sources[:4])
+            lines.append(f"Sources: {names}")
         lines.append("")
 
-    watchlist = _build_watchlist(articles, clusters or [])
+    # Per-topic sections
+    by_topic: OrderedDict[str, list[dict]] = OrderedDict()
+    for story in brief.get("top_stories", []):
+        by_topic.setdefault(story.get("topic", "Other"), []).append(story)
+
+    for topic, stories in by_topic.items():
+        if len(by_topic) <= 1:
+            continue
+        lines.append(_section_label(topic))
+        for story in stories:
+            lines.append(f"- {story.get('headline', '')}")
+            if story.get("what_happened"):
+                lines.append(f"  {story['what_happened'][:200]}")
+        lines.append("")
+
+    watchlist = brief.get("watchlist") or []
     if watchlist:
-        lines.append("WATCHLIST")
-        lines.extend(f"- {item}" for item in watchlist)
+        lines.append("⚠️ Watchlist")
+        for item in watchlist:
+            reason = item.get("reason", "").replace("_", " ")
+            lines.append(f"- {reason.title()}: {item.get('story', '')}")
         lines.append("")
+
+    if brief.get("fallback"):
+        lines.append("(Local fallback brief — Groq unavailable or over budget)")
 
     return "\n".join(lines).rstrip()
 
 
-def _build_watchlist(articles: list[Article], clusters: list[StoryCluster]) -> list[str]:
-    items: list[str] = []
+def format_ntfy_summary(brief: dict[str, Any], max_stories: int = 6) -> str:
+    """Concise notification body (not a wall of text)."""
+    lines: list[str] = []
+    for i, story in enumerate(brief.get("top_stories", [])[:max_stories], 1):
+        topic = story.get("topic", "")
+        lines.append(f"{i}. [{topic}] {story.get('headline', '')}")
+        if story.get("what_happened"):
+            lines.append(f"What happened: {story['what_happened'][:180]}")
+        if story.get("why_it_matters"):
+            lines.append(f"Why it matters: {story['why_it_matters'][:140]}")
+        if story.get("what_to_watch_next"):
+            lines.append(f"Watch next: {story['what_to_watch_next'][:100]}")
+        lines.append("")
 
-    # Likely to develop: highest-importance story with an explicit "what to watch".
-    developing = sorted(
-        (a for a in articles if a.what_to_watch_next),
-        key=lambda a: (a.importance or 0),
-        reverse=True,
-    )
-    if developing:
-        a = developing[0]
-        items.append(f"Likely to develop: {a.title} — {a.what_to_watch_next}")
+    watchlist = brief.get("watchlist") or []
+    if watchlist:
+        lines.append("⚠️ Watchlist")
+        for item in watchlist[:2]:
+            lines.append(f"- {item.get('reason', '')}: {item.get('story', '')[:80]}")
 
-    # Underreported: a meaningful story carried by only one source.
-    source_counts: dict[str, int] = {}
-    for a in articles:
-        source_counts[a.source.lower()] = source_counts.get(a.source.lower(), 0) + 1
-    underreported = [
-        a for a in articles if (a.importance or 0) >= 7 and source_counts.get(a.source.lower(), 0) == 1
+    return "\n".join(lines).strip()
+
+
+def format_story_more(story: dict[str, Any]) -> str:
+    parts = [
+        f"#{story.get('cluster_id')}: {story.get('headline', '')}",
+        f"Topic: {story.get('topic', '')}",
+        "",
     ]
-    if underreported:
-        a = max(underreported, key=lambda x: x.importance or 0)
-        if not developing or a.title != developing[0].title:
-            items.append(f"Underreported: {a.title} ({a.source})")
+    for key, label in [
+        ("what_happened", "What happened"),
+        ("background", "Background"),
+        ("why_it_matters", "Why it matters"),
+        ("what_is_uncertain", "What's uncertain"),
+        ("what_to_watch_next", "Watch next"),
+    ]:
+        if story.get(key):
+            parts.append(f"{label}: {story[key]}")
+    comp = story.get("source_comparison") or {}
+    if comp.get("agreement"):
+        parts.append(f"Source agreement: {comp['agreement']}")
+    if comp.get("differences"):
+        parts.append(f"Source differences: {comp['differences']}")
+    sources = story.get("sources") or []
+    if sources:
+        parts.append("")
+        parts.append("Sources:")
+        for s in sources:
+            parts.append(f"- {s.get('name')}: {s.get('url')}")
+    return "\n".join(parts)
 
-    # Conflicting reports: any cluster covered by multiple outlets.
-    conflicting = [c for c in clusters if c.conflicting_details]
-    if conflicting:
-        c = max(conflicting, key=lambda x: x.importance or 0)
-        items.append(f"Conflicting reports: {c.title} — {c.conflicting_details}")
 
-    return items
+def format_story_full(story: dict[str, Any], extracted: dict[str, str] | None = None) -> str:
+    parts = [format_story_more(story)]
+    for key, label in [
+        ("who_is_affected", "Who is affected"),
+        ("who_benefits", "Who benefits"),
+        ("who_loses", "Who loses"),
+    ]:
+        if story.get(key):
+            parts.append(f"{label}: {story[key]}")
+    comp = story.get("source_comparison") or {}
+    if comp.get("framing_or_bias"):
+        parts.append(f"Framing/bias: {comp['framing_or_bias']}")
+    if extracted:
+        parts.append("")
+        parts.append("--- Extracted article text ---")
+        for url, text in list(extracted.items())[:2]:
+            parts.append(f"\n{url}\n{text[:1500]}")
+    return "\n".join(parts)
+
+
+def format_story_sources(story: dict[str, Any]) -> str:
+    lines = [f"Sources for #{story.get('cluster_id')}: {story.get('headline', '')}", ""]
+    for s in story.get("sources") or []:
+        lines.append(f"- {s.get('name')}: {s.get('url')}")
+    return "\n".join(lines) if len(lines) > 2 else "No sources listed."

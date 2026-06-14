@@ -1,0 +1,1 @@
+"""Pluggable news source connectors."""
