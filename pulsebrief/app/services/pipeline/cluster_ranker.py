@@ -4,14 +4,20 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from datetime import datetime
+
+from rapidfuzz import fuzz
 
 from app.config import TopicConfig, load_config
 from app.services.pipeline.article import PipelineArticle, StoryClusterData
-from app.services.pipeline.scorer import topic_fits, _topic_match
+from app.services.pipeline.scorer import _topic_match
+from app.services.pipeline.topic_classifier import topic_fits
 
 logger = logging.getLogger(__name__)
 
 INTERNATIONAL_TOPICS = {"world news", "geopolitics", "international"}
+_FRESH_TOPICS = {"finance", "markets"}
+_ROTATE_TOPICS = {"finance", "markets", "world news", "us news", "tech"}
 
 
 def _cluster_key(title: str) -> str:
@@ -27,6 +33,35 @@ def _singleton_cluster(article: PipelineArticle) -> StoryClusterData:
         importance_score=article.importance_score,
         is_opinion=article.is_opinion,
     )
+
+
+def _headline_repeated(headline: str, previous: str | None) -> bool:
+    if not previous:
+        return False
+    return fuzz.token_set_ratio(headline, previous) >= 88
+
+
+def _hours_since(published_at: datetime | None) -> float | None:
+    if not published_at:
+        return None
+    return max(0.0, (datetime.utcnow() - published_at).total_seconds() / 3600)
+
+
+def _leader_rank_key(cluster: StoryClusterData) -> tuple[float, float, float]:
+    """Higher is better: importance, recency boost, source count."""
+    rep = cluster.representative or (cluster.articles[0] if cluster.articles else None)
+    hours = _hours_since(rep.published_at if rep else None)
+    recency = 0.0
+    if hours is not None:
+        if hours <= 6:
+            recency = 3.0
+        elif hours <= 12:
+            recency = 2.0
+        elif hours <= 24:
+            recency = 1.0
+        elif hours > 48:
+            recency = -1.0
+    return (cluster.importance_score + recency, recency, float(cluster.source_count))
 
 
 class ClusterRanker:
@@ -173,8 +208,10 @@ class ClusterRanker:
         clusters: list[StoryClusterData],
         topics: list[TopicConfig],
         articles: list[PipelineArticle] | None = None,
+        previous_heads: dict[str, str] | None = None,
     ) -> list[StoryClusterData]:
         """Best cluster per configured topic — backbone of the daily brief."""
+        prev = previous_heads or {}
         ranked = sorted(clusters, key=self._cluster_score, reverse=True)
         by_topic: dict[str, list[StoryClusterData]] = {}
         for cluster in ranked:
@@ -188,24 +225,70 @@ class ClusterRanker:
         leaders: list[StoryClusterData] = []
         for topic in sorted(topics, key=lambda t: t.priority, reverse=True):
             leader: StoryClusterData | None = None
-            for cluster in by_topic.get(topic.name, []):
+            topic_key = topic.name.lower()
+            rotate = topic_key in _ROTATE_TOPICS
+            prev_headline = prev.get(topic.name)
+
+            cluster_candidates = sorted(
+                by_topic.get(topic.name, []),
+                key=_leader_rank_key,
+                reverse=True,
+            )
+            for cluster in cluster_candidates:
                 rep = cluster.representative or cluster.articles[0]
-                if topic_fits(rep, topic):
-                    leader = cluster
-                    break
+                if not topic_fits(rep, topic):
+                    continue
+                if rotate and _headline_repeated(cluster.cluster_title, prev_headline):
+                    continue
+                # Finance/Markets: prefer stories from the last 24h when available.
+                if topic_key in _FRESH_TOPICS:
+                    hours = _hours_since(rep.published_at)
+                    if hours is not None and hours > 36:
+                        continue
+                leader = cluster
+                break
+
             if not leader:
-                for article in articles_by_topic.get(topic.name, []):
-                    if topic_fits(article, topic):
-                        leader = _singleton_cluster(article)
+                for cluster in cluster_candidates:
+                    rep = cluster.representative or cluster.articles[0]
+                    if topic_fits(rep, topic):
+                        leader = cluster
                         break
-            # US: if nothing domestic enough, still show top NPR story that isn't UK-tagged junk.
+
+            if not leader:
+                article_candidates = articles_by_topic.get(topic.name, [])
+                if topic_key in _FRESH_TOPICS:
+                    article_candidates = sorted(
+                        article_candidates,
+                        key=lambda a: (
+                            a.importance_score,
+                            -(_hours_since(a.published_at) or 999),
+                        ),
+                        reverse=True,
+                    )
+                for article in article_candidates:
+                    if not topic_fits(article, topic):
+                        continue
+                    if rotate and _headline_repeated(article.title, prev_headline):
+                        continue
+                    leader = _singleton_cluster(article)
+                    break
+
             if not leader and topic.name.lower() == "us news":
                 for article in articles_by_topic.get(topic.name, []):
                     if _topic_match(article, topic) >= 0:
                         leader = _singleton_cluster(article)
                         break
+
             if leader:
                 leaders.append(leader)
+                if rotate and prev_headline and _headline_repeated(
+                    leader.cluster_title, prev_headline
+                ):
+                    logger.info(
+                        "Topic %s: no fresh alternative to previous headline",
+                        topic.name,
+                    )
 
         logger.info(
             "Per-topic leaders: %d / %d topics have a story",

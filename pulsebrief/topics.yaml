@@ -47,17 +47,17 @@ topics:
   - name: Finance
     priority: 4
     max_clusters: 2
-    keywords: [finance, economy, inflation, Federal Reserve, interest rates, central bank, recession]
-    negative_keywords: []
-    queries: [finance OR economy OR inflation OR Federal Reserve]
-    source_preferences: [Bloomberg, Financial Times, Reuters, CNBC]
+    keywords: [economy, inflation, Federal Reserve, interest rates, GDP, recession, jobs report, treasury, tariff]
+    negative_keywords: [world cup, israel, iran, g7 summit, military strike, peace deal]
+    queries: [economy OR inflation OR "Federal Reserve" OR "interest rates"]
+    source_preferences: [Bloomberg, CNBC, NPR, Reuters, MarketWatch]
 
   - name: Markets
     priority: 3
     max_clusters: 1
-    keywords: [stock market, Wall Street, S&P 500, Nasdaq, earnings, IPO, bonds]
-    negative_keywords: []
-    queries: [stock market OR Wall Street OR Nasdaq OR earnings]
+    keywords: [stock market, Wall Street, S&P 500, Nasdaq, earnings, IPO, bonds, trading]
+    negative_keywords: [world cup, israel, iran, g7 summit, military]
+    queries: ['"stock market" OR Wall Street OR Nasdaq OR earnings']
     source_preferences: [Bloomberg, CNBC, MarketWatch]
 
   - name: Startups

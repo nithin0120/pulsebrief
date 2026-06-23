@@ -9,17 +9,28 @@ from app.services.pipeline.article import ClusterContext, StoryClusterData
 from app.services.pipeline.fallback import _why_heuristic
 
 
-def _extractive_paragraph(ctx: ClusterContext) -> str:
-    """2–4 sentences from extracted article text or descriptions."""
+def _extractive_paragraph(ctx: ClusterContext, *, max_sentences: int = 6) -> str:
+    """Multi-sentence summary from extracted article text or descriptions."""
     sents = [s.strip() for s in ctx.extracted_key_sentences if s and s.strip()]
     if len(sents) >= 2:
-        return " ".join(sents[:4])
+        return " ".join(sents[:max_sentences])
     if sents:
         return sents[0]
-    for desc in ctx.descriptions:
-        if desc and len(desc.strip()) > 40:
-            return desc.strip()
+    desc_parts = [d.strip() for d in ctx.descriptions if d and len(d.strip()) > 40]
+    if desc_parts:
+        return " ".join(desc_parts[:3])
     return ctx.cluster_title
+
+
+def _background_paragraph(ctx: ClusterContext) -> str:
+    sents = [s.strip() for s in ctx.extracted_key_sentences if s and s.strip()]
+    if len(sents) > 6:
+        return " ".join(sents[6:10])
+    if ctx.descriptions:
+        extra = [d.strip() for d in ctx.descriptions[1:3] if d and len(d.strip()) > 30]
+        if extra:
+            return " ".join(extra)
+    return ""
 
 
 def _story_from_context(
@@ -40,7 +51,7 @@ def _story_from_context(
         "headline": ctx.cluster_title,
         "topic": ctx.topic,
         "what_happened": _extractive_paragraph(ctx),
-        "background": ctx.descriptions[0] if ctx.descriptions else "",
+        "background": _background_paragraph(ctx) or (ctx.descriptions[0] if ctx.descriptions else ""),
         "why_it_matters": _why_heuristic(cluster),
         "who_is_affected": "",
         "who_benefits": "",

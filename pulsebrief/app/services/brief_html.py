@@ -31,7 +31,9 @@ article {
 article.breaking { border-color: #f4212e; }
 h2 { font-size: 1.05rem; margin: 0 0 10px; line-height: 1.35; }
 .summary { margin: 0 0 10px; color: #e7e9ea; }
-.why { margin: 0 0 12px; color: #aab8c2; font-size: 0.95rem; }
+.background { margin: 0 0 10px; color: #aab8c2; font-size: 0.95rem; }
+.why { margin: 0 0 10px; color: #aab8c2; font-size: 0.95rem; }
+.watch { margin: 0 0 12px; color: #71767b; font-size: 0.9rem; font-style: italic; }
 .sources { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 a.btn {
   display: inline-block; padding: 8px 14px; border-radius: 999px;
@@ -69,7 +71,9 @@ def render_brief_html(brief: dict[str, Any], run_id: int | None = None) -> str:
         topic = story.get("topic", "Other")
         headline = html.escape(story.get("headline") or "")
         what = html.escape(story.get("what_happened") or "").replace("\n", "<br>")
+        background = html.escape(story.get("background") or "").strip().replace("\n", "<br>")
         why = html.escape(story.get("why_it_matters") or "").strip()
+        watch = html.escape(story.get("what_to_watch_next") or "").strip()
         breaking = is_breaking_story(story)
         cls = ' class="breaking"' if breaking else ""
 
@@ -81,8 +85,12 @@ def render_brief_html(brief: dict[str, Any], run_id: int | None = None) -> str:
         parts.append(f"<h2>{headline}</h2>")
         if what:
             parts.append(f'<p class="summary">{what}</p>')
+        if background and background != what:
+            parts.append(f'<p class="background"><strong>Context:</strong> {background}</p>')
         if why:
             parts.append(f'<p class="why"><strong>Why it matters:</strong> {why}</p>')
+        if watch and watch.lower() not in ("follow updates from primary sources.", ""):
+            parts.append(f'<p class="watch"><strong>Watch next:</strong> {watch}</p>')
         sources = story.get("sources") or []
         if sources:
             parts.append('<div class="sources">')

@@ -119,6 +119,18 @@ sources:
     enabled: true
 
   # --- Finance / Markets RSS ---
+  - name: CNBC Economy
+    type: rss
+    category: Finance
+    url: https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=20910258
+    reputation: 0.9
+    enabled: true
+  - name: Yahoo Finance
+    type: rss
+    category: Finance
+    url: https://finance.yahoo.com/news/rssindex
+    reputation: 0.75
+    enabled: true
   - name: MarketWatch
     type: rss
     category: Markets
@@ -130,7 +142,7 @@ sources:
     category: Finance
     url: https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114
     reputation: 0.85
-    enabled: true
+    enabled: false
 
   # --- Hacker News (Algolia front page) ---
   - name: Hacker News

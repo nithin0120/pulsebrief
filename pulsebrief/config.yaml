@@ -6,10 +6,10 @@ language:
   allowed: [en]                   # drop non-English headlines (GDELT/RSS leak through)
 
 fetch:
-  max_articles_per_source: 30     # cap per RSS/aggregator query
-  max_total_articles: 300         # hard cap on fetched candidates per run
+  max_articles_per_source: 30
+  max_total_articles: 300
   newsapi_page_size: 30
-  refetch_skip_hours: 6           # skip URLs already fetched within this window
+  refetch_skip_hours: 5           # align with 6h digest — fresh URLs each run
 
 dedup:
   fuzzy_title_threshold: 88       # rapidfuzz token_set_ratio (0-100)
@@ -33,7 +33,7 @@ scoring:
     muted_keyword_penalty: 5.0
     low_quality_source_penalty: 1.5
     opinion_penalty: 0.6
-  recency_half_life_hours: 18     # recency score decays with this half-life
+  recency_half_life_hours: 12     # faster decay so finance/world stories rotate
   low_quality_sources: [biztoc, slashdot, msn]
 
 ranking:
@@ -46,20 +46,21 @@ ranking:
 
 extraction:
   enabled: true
-  max_finalist_full_text: 12       # one per topic (up to 9) + buffer
-  extra_sources_per_cluster: 1
-  max_chars: 6000
-  timeout_seconds: 12
+  max_finalist_full_text: 12
+  extra_sources_per_cluster: 2
+  max_chars: 8000
+  timeout_seconds: 15
 
 compression:
-  key_sentences_per_cluster: 4
-  max_tokens_per_cluster: 350
+  key_sentences_per_cluster: 8
+  max_tokens_per_cluster: 600
 
 groq:
   enabled: true
   max_daily_requests: 20
-  max_tokens_per_digest: 6000
-  max_enrich_clusters: 3           # optional AI polish on top 3 stories only
+  max_tokens_per_digest: 8000
+  max_enrich_clusters: 6           # AI depth on top 6 stories (incl. Finance)
+  enrich_batch_size: 3            # Groq calls in batches of 3 (TPM limit)
 
 ntfy:
   send_summary_notification: true

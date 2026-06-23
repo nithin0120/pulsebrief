@@ -64,7 +64,7 @@ class BriefGenerator:
                 desc_len = 50 if aggressive else 100
                 ctx["descriptions"] = [d[:desc_len] for d in ctx.get("descriptions", [])[:2]]
                 ctx["extracted_key_sentences"] = ctx.get("extracted_key_sentences", [])[
-                    : 1 if aggressive else 2
+                    : 3 if aggressive else 5
                 ]
                 ctx["titles"] = ctx.get("titles", [])[:2]
                 ctx["urls"] = ctx.get("urls", [])[:2]
@@ -89,8 +89,11 @@ class BriefGenerator:
                 '"confidence":"low|medium|high","sources":[{"name":"...","url":"..."}]}],'
                 '"watchlist":[{"story":"...","reason":"likely to develop|underreported|conflicting reports"}]}\n'
                 "You MUST return exactly one top_stories entry for every cluster_id in CLUSTERS.\n"
-                "Write what_happened as a clear 3-4 sentence paragraph (roughly 60-90 words).\n"
-                "Write why_it_matters as one sentence explaining significance.\n"
+                "Write what_happened as a clear 5-6 sentence paragraph (roughly 100-130 words) "
+                "covering key facts, numbers, and who is involved.\n"
+                "Write background as 2-3 sentences of context for readers unfamiliar with the story.\n"
+                "Write why_it_matters as 2 sentences explaining real-world impact.\n"
+                "Write what_to_watch_next as one concrete sentence about upcoming milestones.\n"
                 "Set confidence=high only for major breaking news confirmed by multiple sources.\n"
                 "Be factual; do not invent details beyond the provided context.\n\n"
                 f"CLUSTERS:\n{json.dumps(pl, ensure_ascii=False)}"
@@ -103,7 +106,7 @@ class BriefGenerator:
                     {"role": "user", "content": pr},
                 ],
                 temperature=0.2,
-                max_tokens=min(2400, max_tokens),
+                max_tokens=min(4000, max_tokens),
                 response_format={"type": "json_object"},
             )
             content = resp.choices[0].message.content or ""

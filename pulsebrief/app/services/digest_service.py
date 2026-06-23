@@ -13,6 +13,7 @@ from app.config import PUBLIC_DIR, load_config, load_topics
 from app.services.brief_html import export_brief_static
 from app.models import Article, DigestRun, ExtractedText, StoryCluster
 from app.services import memory as memory_mod
+from app.services.brief_rotation import load_previous_heads, save_previous_heads
 from app.services.brief import (
     format_brief_json,
     format_story_full,
@@ -34,6 +35,7 @@ from app.services.pipeline.local_brief import build_local_brief, merge_groq_poli
 from app.services.pipeline.language_filter import filter_by_language
 from app.services.pipeline.normalizer import normalize_all
 from app.services.pipeline.scorer import score_all
+from app.services.pipeline.topic_classifier import reclassify_articles
 from app.services.preferences import PreferenceFilter
 from app.services.sender import get_sender
 from app.services.sources.orchestrator import FetchOrchestrator
@@ -45,10 +47,15 @@ def _top_for_groq_polish(
     per_topic: list[StoryClusterData],
     limit: int,
 ) -> list[StoryClusterData]:
-    """Top-N stories by importance — optional Groq paragraph polish."""
+    """Top stories for Groq depth — prioritize Finance/Markets and high importance."""
+    priority = {"Finance", "Markets", "World News", "US News", "Cybersecurity", "AI"}
     return sorted(
         per_topic,
-        key=lambda c: (c.importance_score, c.source_count),
+        key=lambda c: (
+            1 if c.topic in priority else 0,
+            c.importance_score,
+            c.source_count,
+        ),
         reverse=True,
     )[:limit]
 
@@ -108,15 +115,17 @@ class DigestService:
             description_threshold=int(dedup_cfg.get("description_threshold", 90)),
         )
 
-        # Stage 4: Score
+        # Stage 4: Score + reclassify into best topic
         articles = score_all(articles, topics, prefs=prefs, memory=mem, config=self.config)
+        articles = reclassify_articles(articles, topics)
 
         # Stage 5: Cluster
         clusters = StoryClusterer(self.config).cluster(articles)
 
         # Stage 6: One top story per topic (guaranteed category coverage)
         ranker = ClusterRanker(self.config)
-        per_topic = ranker.select_per_topic(clusters, topics, articles)
+        previous_heads = load_previous_heads(self.db)
+        per_topic = ranker.select_per_topic(clusters, topics, articles, previous_heads)
 
         if not per_topic:
             run.status = "completed"
@@ -136,21 +145,25 @@ class DigestService:
         # Stage 8: Local brief — all topics, extractive summaries (free, no token limits)
         brief = build_local_brief(per_topic, contexts_all)
 
-        # Stage 9: Optional Groq polish for top stories only
+        # Stage 9: Optional Groq polish — batched to stay under TPM limits
         groq_cfg = self.config.get("groq", {})
-        max_enrich = int(groq_cfg.get("max_enrich_clusters", 3))
+        max_enrich = int(groq_cfg.get("max_enrich_clusters", 6))
+        batch_size = int(groq_cfg.get("enrich_batch_size", 3))
         polish_targets = _top_for_groq_polish(per_topic, max_enrich)
-        polish_topics = {c.topic for c in polish_targets}
         groq_used = 0
 
-        if self.budget.can_request("digest") and polish_targets:
-            polish_contexts = compressor.build_contexts(polish_targets, extracted)
+        for i in range(0, len(polish_targets), batch_size):
+            batch = polish_targets[i : i + batch_size]
+            if not batch or not self.budget.can_request("digest"):
+                break
+            polish_topics = {c.topic for c in batch}
+            polish_contexts = compressor.build_contexts(batch, extracted)
             groq_brief, est_in, est_out = self.brief_gen.generate_digest(
                 polish_contexts,
-                clusters_for_fallback=polish_targets,
+                clusters_for_fallback=batch,
                 max_tokens=self.budget.max_tokens_per_digest,
             )
-            groq_used = 1
+            groq_used += 1
             self.budget.record(
                 purpose="digest",
                 model=self.brief_gen._model,
@@ -161,6 +174,7 @@ class DigestService:
             brief = merge_groq_polish(brief, groq_brief, polish_topics)
 
         self._last_brief = brief
+        save_previous_heads(brief)
 
         # Persist articles + clusters + digest run
         self._store_pipeline_results(run, per_topic, brief)

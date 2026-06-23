@@ -7,3 +7,5 @@ pulsebrief.db
 .DS_Store
 logs/
 public/
+.last_brief.json
+app/services/Curio/

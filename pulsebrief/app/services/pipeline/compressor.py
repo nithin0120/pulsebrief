@@ -55,7 +55,7 @@ class ContextCompressor:
         for i, cluster in enumerate(clusters, 1):
             rep = cluster.representative
             titles = [a.title for a in cluster.articles[:4]]
-            descriptions = [(a.description or "")[:220] for a in cluster.articles[:4]]
+            descriptions = [(a.description or "")[:400] for a in cluster.articles[:4]]
             urls = [a.url for a in cluster.articles[:4]]
             sources = cluster.source_names[:4]
             dates = [

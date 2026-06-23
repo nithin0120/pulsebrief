@@ -71,36 +71,6 @@ def _topic_match(article: PipelineArticle, topic: TopicConfig) -> float:
     return min(2.0, hits / max(len(kws), 1) * 2.0)
 
 
-def topic_fits(
-    article: PipelineArticle,
-    topic: TopicConfig,
-    *,
-    min_score: float = 0.2,
-) -> bool:
-    """Whether a story belongs in this topic section."""
-    score = _topic_match(article, topic)
-    if score < 0:
-        return False
-
-    # US feeds (NPR, AP) often carry international wire copy — require domestic signals.
-    if topic.name.lower() == "us news":
-        if score >= min_score:
-            return True
-        text = f"{article.title} {article.description or ''}".lower()
-        us_signals = (
-            "united states", "u.s.", " us ", "u.s ", "congress", "white house",
-            "supreme court", "american", "washington", "federal", "senate",
-            "governor", "pentagon", "capitol", "fbi", "cia", "doj", "trump",
-            "biden", "republican", "democrat",
-        )
-        return any(sig in text for sig in us_signals)
-
-    # RSS/HN/GDELT category tags are reliable for non-US topics.
-    if article.topic == topic.name:
-        return True
-    return score >= min_score
-
-
 def score_article(
     article: PipelineArticle,
     topics: list[TopicConfig],

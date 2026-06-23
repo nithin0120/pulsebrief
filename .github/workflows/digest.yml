@@ -49,6 +49,14 @@ jobs:
           restore-keys: |
             pulsebrief-lastrun-
 
+      - name: Restore previous brief headlines
+        uses: actions/cache/restore@v4
+        with:
+          path: pulsebrief/.last_brief.json
+          key: pulsebrief-lastbrief-${{ github.run_id }}
+          restore-keys: |
+            pulsebrief-lastbrief-
+
       - name: Decide whether to run
         id: decide
         working-directory: ${{ github.workspace }}
@@ -119,3 +127,10 @@ jobs:
         with:
           path: pulsebrief/.lastrun
           key: pulsebrief-lastrun-${{ github.run_id }}
+
+      - name: Save previous brief headlines
+        if: steps.decide.outputs.run == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: pulsebrief/.last_brief.json
+          key: pulsebrief-lastbrief-${{ github.run_id }}
